@@ -73,9 +73,18 @@ _TABLES_END     = 25  # pages 6-25: supply/demand tables
 _NUMBER_RE = re.compile(r'\d')
 # Keeps only rows that are production/stocks totals or key country lines
 _KEY_ROW_RE = re.compile(
-    r'\b(production|ending.stock|world|united.states|brazil|argentina|20\d\d)\b',
+    r'\b(production|ending.stock|world|united.states|brazil|argentina|20\d\d|million)\b',
     re.IGNORECASE,
 )
+
+_THOUSANDS_COMMA_RE = re.compile(r'(?<=\d),(?=\d{3}(?:[^0-9]|$))')
+
+
+def _normalize_numbers(text: str) -> str:
+    """Strip thousands-separator commas so '4,374' → '4374' before LLM sees it."""
+    for _ in range(3):
+        text = _THOUSANDS_COMMA_RE.sub('', text)
+    return text
 
 
 def _extract_key_table_lines(text: str) -> list[str]:
@@ -111,7 +120,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
                         table_parts.append(f"[p{i+1}]\n" + "\n".join(key_lines))
 
     filtered_highlights = _filter_commodity_text("\n\n".join(highlights_parts))
-    table_text = "\n\n".join(table_parts)
+    table_text = _normalize_numbers("\n\n".join(table_parts))
 
     full_text = filtered_highlights
     if table_text:

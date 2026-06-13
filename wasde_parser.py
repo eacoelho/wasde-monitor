@@ -99,13 +99,15 @@ Extract the following data and return ONLY a valid JSON object (no markdown, no 
 }}
 
 Use null for any value that cannot be found.
-CRITICAL — ALL numbers MUST be in million metric tons (MMT). NEVER use bushels.
-If the report shows values in million bushels, convert before returning:
-  corn: million bushels ÷ 39.368 = MMT
-  soybeans: million bushels ÷ 36.744 = MMT
-  wheat: million bushels ÷ 36.744 = MMT
-All production numbers in million metric tons (MMT).
-All ending stocks in million metric tons (MMT).
+ALL numbers in the JSON must be in million metric tons (MMT). NEVER write mathematical expressions — always write ONLY the final computed number.
+UNIT RULES:
+- World rows in the tables are already in MMT. Copy them directly.
+- Brazil and Argentina rows are already in MMT. Copy them directly.
+- US rows marked "(Million Bushels)" need conversion — compute internally:
+    corn:         million bushels ÷ 39.368 = MMT
+    soybeans:     million bushels ÷ 36.744 = MMT
+    wheat:        million bushels ÷ 36.744 = MMT
+  Example: 4374 million bushels soybeans → 4374 ÷ 36.744 = 119.0 → write 119.0
 Prior = previous month's estimate. Current = this month's revised estimate.
 For the May report (crop year flip), use the MOST RECENT crop year's data for "current" and the prior month's old crop year data for "prior" where applicable. Note differences in key_changes.
 
@@ -136,9 +138,17 @@ def _clean_json(raw: str) -> str:
     #    Matches a comma between a digit and exactly 3 digits followed by non-digit
     for _ in range(3):                       # up to 3 passes for 7-digit numbers
         raw = re.sub(r"(?<=\d),(?=\d{3}(?:[^0-9]|$))", "", raw)
-    # 5. Trailing commas
+    # 5. Evaluate bare division expressions left by LLM showing conversion work
+    #    e.g.  4374 / 36.744  →  119.043  (spaces required to avoid "25/26" strings)
+    def _eval_div(m):
+        try:
+            return str(round(float(m.group(1)) / float(m.group(2)), 3))
+        except Exception:
+            return m.group(0)
+    raw = re.sub(r'(\d+\.?\d*)\s+/\s+(\d+\.?\d+)', _eval_div, raw)
+    # 6. Trailing commas
     raw = re.sub(r",(\s*[}\]])", r"\1", raw)
-    # 6. Extract JSON object if prose surrounds it
+    # 7. Extract JSON object if prose surrounds it
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if m:
         raw = m.group(0)
