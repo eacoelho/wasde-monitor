@@ -71,14 +71,27 @@ _HIGHLIGHTS_END = 5   # pages 1-5: narrative highlights
 _TABLES_END     = 25  # pages 6-25: supply/demand tables
 
 _NUMBER_RE = re.compile(r'\d')
+# Keeps only rows that are production/stocks totals or key country lines
+_KEY_ROW_RE = re.compile(
+    r'\b(production|ending.stock|world|united.states|brazil|argentina|20\d\d)\b',
+    re.IGNORECASE,
+)
+
+
+def _extract_key_table_lines(text: str) -> list[str]:
+    """Return only lines that have numbers AND match a key-row term."""
+    return [
+        line for line in text.splitlines()
+        if _NUMBER_RE.search(line) and _KEY_ROW_RE.search(line)
+    ]
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
     Two-segment extraction to stay within Groq token limits:
     - Pages 1-5  (highlights): commodity paragraph filter — full prose kept
-    - Pages 6-25 (tables): only pages whose header mentions a target commodity,
-      and only lines that contain numbers (strips footnotes and prose)
+    - Pages 6-25 (tables): commodity-themed pages, key rows only
+      (Production, Ending Stocks, World, USA, Brazil, Argentina, year headers)
     """
     highlights_parts = []
     table_parts = []
@@ -91,12 +104,11 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
             if i < _HIGHLIGHTS_END:
                 highlights_parts.append(f"--- PAGE {i+1} ---\n{text}")
             else:
-                # Only keep table pages that are about our three commodities
                 page_header = "\n".join(text.splitlines()[:5]).lower()
                 if any(kw in page_header for kw in _COMMODITY_KEYWORDS):
-                    num_lines = [l for l in text.splitlines() if _NUMBER_RE.search(l)]
-                    if num_lines:
-                        table_parts.append(f"[p{i+1}]\n" + "\n".join(num_lines))
+                    key_lines = _extract_key_table_lines(text)
+                    if key_lines:
+                        table_parts.append(f"[p{i+1}]\n" + "\n".join(key_lines))
 
     filtered_highlights = _filter_commodity_text("\n\n".join(highlights_parts))
     table_text = "\n\n".join(table_parts)

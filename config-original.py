@@ -12,8 +12,9 @@ TELEGRAM_CHAT_ID   = "YOUR_CHAT_ID_HERE"    # e.g. "-1001234567890"
 GROQ_API_KEY = "YOUR_GROQ_API_KEY_HERE"
 
 # ── TTS Settings ──────────────────────────────────────────────────────────────
-TTS_MODEL = "canopylabs/orpheus-v1-english"
-TTS_VOICE = "diana"
+ENABLE_AUDIO = True                          # set False to skip audio generation
+TTS_MODEL    = "canopylabs/orpheus-v1-english"
+TTS_VOICE    = "diana"
 
 # ── LLM Settings ─────────────────────────────────────────────────────────────
 LLM_MODEL = "llama-3.3-70b-versatile"

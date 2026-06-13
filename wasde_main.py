@@ -5,9 +5,8 @@ Called by the scheduler when a WASDE release is detected.
 """
 
 import logging
-import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from wasde_fetcher     import get_wasde_text
@@ -55,11 +54,20 @@ def run_wasde_pipeline(year: int, month: int) -> bool:
     logger.info("Step 5: Building Telegram message...")
     text_msg = build_telegram_message(data, market_prices)
 
-    # ── 6. Generate audio ────────────────────────────────────────────────────
-    logger.info("Step 6: Generating audio...")
+    # ── 6. Generate audio (optional) ─────────────────────────────────────────
+    audio_ok = False
     audio_path = f"/tmp/wasde_{year}{month:02d}.ogg"
-    tts_script = build_tts_script(data, market_prices)
-    audio_ok = text_to_speech(tts_script, audio_path)
+    try:
+        from config import ENABLE_AUDIO
+    except ImportError:
+        ENABLE_AUDIO = True
+
+    if ENABLE_AUDIO:
+        logger.info("Step 6: Generating audio...")
+        tts_script = build_tts_script(data, market_prices)
+        audio_ok = text_to_speech(tts_script, audio_path)
+    else:
+        logger.info("Step 6: Audio disabled (ENABLE_AUDIO=False).")
 
     # ── 7. Send to Telegram ──────────────────────────────────────────────────
     logger.info("Step 7: Sending to Telegram...")
@@ -89,14 +97,48 @@ def _send_error(msg: str):
         pass
 
 
+def latest_wasde_date() -> tuple[int, int]:
+    """
+    Returns (year, month) of the most recent released WASDE report.
+    Checks RELEASE_DATES_2026 from config first; falls back to a date heuristic
+    (WASDE releases around the 10th-12th of each month at 12pm ET).
+    """
+    now_utc = datetime.now(timezone.utc)
+    try:
+        from config import RELEASE_DATES_2026
+        # Release is at 12pm ET = 16:00 UTC (summer) / 17:00 UTC (winter)
+        past = [
+            (y, m) for y, m, d in RELEASE_DATES_2026
+            if datetime(y, m, d, 17, 0, tzinfo=timezone.utc) <= now_utc
+        ]
+        if past:
+            return past[-1]
+    except (ImportError, AttributeError):
+        pass
+
+    # Heuristic: if after the 11th, current month is released; otherwise last month
+    if now_utc.day >= 11:
+        return now_utc.year, now_utc.month
+    if now_utc.month == 1:
+        return now_utc.year - 1, 12
+    return now_utc.year, now_utc.month - 1
+
+
 if __name__ == "__main__":
-    """Run manually for testing: python wasde_main.py"""
+    """
+    Usage:
+        python wasde_main.py            # auto-detect latest available report
+        python wasde_main.py 2026 6     # explicit year and month
+    """
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    now = datetime.utcnow()
-    year  = int(sys.argv[1]) if len(sys.argv) > 1 else now.year
-    month = int(sys.argv[2]) if len(sys.argv) > 2 else now.month
+    if len(sys.argv) >= 3:
+        year  = int(sys.argv[1])
+        month = int(sys.argv[2])
+    else:
+        year, month = latest_wasde_date()
+        logger.info(f"No date specified — using latest available report: {month:02d}/{year}")
 
     print(f"Running WASDE pipeline for {month:02d}/{year}...")
     ok = run_wasde_pipeline(year, month)
