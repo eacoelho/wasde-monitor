@@ -1,0 +1,20 @@
+[Unit]
+Description=WASDE Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_VPS_USER
+WorkingDirectory=/path/to/wasde_bot
+ExecStart=/path/to/venv/bin/python /path/to/wasde_bot/scheduler.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (alternatively, use EnvironmentFile=)
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
