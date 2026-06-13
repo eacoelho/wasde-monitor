@@ -196,7 +196,7 @@ def _draw_table(draw, x, y, title, title_color, col_headers, rows, f_tbl, f_hdr,
 
     # ── Header row ────────────────────────────────────────────────────────────
     draw.rectangle([x, y, x + tw, y + _HDR_H], fill=_SURFACE2)
-    draw.rectangle([x, y, x + 4, y + _HDR_H], fill=title_color)
+    draw.rectangle([x, y, x + 5, y + _HDR_H], fill=title_color)
     _draw_left(draw, x + 4, y, _COL0_W, _HDR_H, title, f_tbl, title_color)
 
     for i, hdr in enumerate(col_headers):
@@ -234,11 +234,11 @@ def _draw_section_title(draw, x, y, text, f_sec) -> int:
     """Draw a prominent section header strip."""
     draw.rectangle([x, y, x + _TABLE_W, y + _SECTION_H], fill=_SURFACE3)
     # thick left accent bar
-    draw.rectangle([x, y, x + 6, y + _SECTION_H], fill=_SECTION_ACCENT)
+    draw.rectangle([x, y, x + 8, y + _SECTION_H], fill=_SECTION_ACCENT)
     # bottom separator line
     draw.line([(x, y + _SECTION_H - 1), (x + _TABLE_W, y + _SECTION_H - 1)],
               fill=_SECTION_ACCENT, width=1)
-    _draw_left(draw, x + 6, y, _TABLE_W - 6, _SECTION_H, text, f_sec, _TEXT, pad=12)
+    _draw_left(draw, x + 8, y, _TABLE_W - 8, _SECTION_H, text, f_sec, _TEXT, pad=14)
     return y + _SECTION_H
 
 
