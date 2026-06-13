@@ -20,7 +20,7 @@ TTS_VOICE    = "diana"
 LLM_PROVIDER   = "groq"                      # "groq" or "gemini"
 LLM_MODEL      = "llama-3.3-70b-versatile"   # model used when LLM_PROVIDER = "groq"
 GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
-GEMINI_MODEL   = "gemini-1.5-flash"          # model used when LLM_PROVIDER = "gemini"
+GEMINI_MODEL   = "gemini-2.0-flash-lite"     # model used when LLM_PROVIDER = "gemini"
 
 # ── WASDE URL Pattern ─────────────────────────────────────────────────────────
 # wasde{MM}{YY}.pdf  e.g. wasde0626.pdf for June 2026

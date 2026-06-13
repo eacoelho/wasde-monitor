@@ -36,10 +36,7 @@ if _PROVIDER == "gemini":
         from google import genai as _genai
         from google.genai import types as _genai_types
         from config import GEMINI_API_KEY, GEMINI_MODEL as _GEMINI_MODEL_NAME
-        _gemini_client = _genai.Client(
-            api_key=GEMINI_API_KEY,
-            http_options={"api_version": "v1"},
-        )
+        _gemini_client = _genai.Client(api_key=GEMINI_API_KEY)
         logger.info(f"LLM provider: Gemini ({_GEMINI_MODEL_NAME})")
     except ImportError:
         raise RuntimeError(
