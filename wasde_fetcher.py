@@ -67,7 +67,7 @@ def _filter_commodity_text(text: str) -> str:
     return "\n\n".join(kept)
 
 
-def extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 5) -> str:
+def extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 12) -> str:
     """
     Extracts text from the first max_pages pages of a PDF using pdfplumber,
     then filters to keep only paragraphs related to soybeans, corn, and wheat.

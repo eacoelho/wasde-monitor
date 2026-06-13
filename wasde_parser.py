@@ -79,15 +79,21 @@ Extract the following data and return ONLY a valid JSON object (no markdown, no 
     }}
   }},
   "key_changes": [
-    // 5-8 bullet points in Portuguese (pt-BR) summarizing the most important changes.
-    // Focus on significant revisions, surprises vs market expectations, and directional implications.
-    // Each bullet: 1-2 sentences, concise, analytical tone.
-    "• ...",
-    "• ..."
+    // EXACTLY 3 bullet points in Portuguese (pt-BR) — one per commodity in this order: soja, milho, trigo.
+    // Each bullet summarizes the most important production or stocks revision for that commodity.
+    // Concise analytical tone, 1-2 sentences. Use ONLY metric tons — NEVER bushels.
+    "• Soja: ...",
+    "• Milho: ...",
+    "• Trigo: ..."
   ]
 }}
 
 Use null for any value that cannot be found.
+CRITICAL — ALL numbers MUST be in million metric tons (MMT). NEVER use bushels.
+If the report shows values in million bushels, convert before returning:
+  corn: million bushels ÷ 39.368 = MMT
+  soybeans: million bushels ÷ 36.744 = MMT
+  wheat: million bushels ÷ 36.744 = MMT
 All production numbers in million metric tons (MMT).
 All ending stocks in million metric tons (MMT).
 Prior = previous month's estimate. Current = this month's revised estimate.
