@@ -5,6 +5,7 @@ Robust to temporary failures — retries for up to 10 minutes after release time
 """
 
 import io
+import re
 import time
 import logging
 import requests
@@ -52,26 +53,45 @@ def fetch_wasde_pdf(year: int, month: int, max_wait_minutes: int = 15) -> bytes 
     return None
 
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+_COMMODITY_KEYWORDS = {
+    "soybean", "soybeans", "oilseed", "oilseeds",
+    "corn", "maize",
+    "wheat",
+}
+
+
+def _filter_commodity_text(text: str) -> str:
+    """Keep only paragraphs that mention soybeans, corn, or wheat."""
+    paragraphs = re.split(r"\n\s*\n", text)
+    kept = [p for p in paragraphs if any(kw in p.lower() for kw in _COMMODITY_KEYWORDS)]
+    return "\n\n".join(kept)
+
+
+def extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 5) -> str:
     """
-    Extracts all text from a PDF using pdfplumber.
-    Returns full text concatenated across all pages.
+    Extracts text from the first max_pages pages of a PDF using pdfplumber,
+    then filters to keep only paragraphs related to soybeans, corn, and wheat.
     """
     text_parts = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for i, page in enumerate(pdf.pages):
+        pages_to_read = pdf.pages[:max_pages]
+        for i, page in enumerate(pages_to_read):
             page_text = page.extract_text(x_tolerance=2, y_tolerance=3)
             if page_text:
                 text_parts.append(f"--- PAGE {i+1} ---\n{page_text}")
 
-    full_text = "\n\n".join(text_parts)
-    logger.info(f"Extracted {len(full_text):,} characters from PDF ({len(text_parts)} pages)")
-    return full_text
+    raw_text = "\n\n".join(text_parts)
+    filtered = _filter_commodity_text(raw_text)
+    logger.info(
+        f"Extracted {len(raw_text):,} chars from first {len(text_parts)} pages; "
+        f"{len(filtered):,} chars after commodity filter"
+    )
+    return filtered
 
 
 def get_wasde_text(year: int, month: int) -> str | None:
     """
-    End-to-end: fetch PDF and return extracted text.
+    End-to-end: fetch PDF and return extracted text (highlights pages, commodity-filtered).
     """
     pdf_bytes = fetch_wasde_pdf(year, month)
     if not pdf_bytes:
