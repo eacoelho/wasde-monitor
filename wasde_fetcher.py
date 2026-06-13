@@ -67,31 +67,55 @@ def _filter_commodity_text(text: str) -> str:
     return "\n\n".join(kept)
 
 
-def extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 12) -> str:
-    """
-    Extracts text from the first max_pages pages of a PDF using pdfplumber,
-    then filters to keep only paragraphs related to soybeans, corn, and wheat.
-    """
-    text_parts = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        pages_to_read = pdf.pages[:max_pages]
-        for i, page in enumerate(pages_to_read):
-            page_text = page.extract_text(x_tolerance=2, y_tolerance=3)
-            if page_text:
-                text_parts.append(f"--- PAGE {i+1} ---\n{page_text}")
+_HIGHLIGHTS_END = 5   # pages 1-5: narrative highlights
+_TABLES_END     = 25  # pages 6-25: supply/demand tables
 
-    raw_text = "\n\n".join(text_parts)
-    filtered = _filter_commodity_text(raw_text)
+_NUMBER_RE = re.compile(r'\d')
+
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """
+    Two-segment extraction to stay within Groq token limits:
+    - Pages 1-5  (highlights): commodity paragraph filter — full prose kept
+    - Pages 6-25 (tables): only pages whose header mentions a target commodity,
+      and only lines that contain numbers (strips footnotes and prose)
+    """
+    highlights_parts = []
+    table_parts = []
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for i, page in enumerate(pdf.pages[:_TABLES_END]):
+            text = page.extract_text(x_tolerance=2, y_tolerance=3)
+            if not text:
+                continue
+            if i < _HIGHLIGHTS_END:
+                highlights_parts.append(f"--- PAGE {i+1} ---\n{text}")
+            else:
+                # Only keep table pages that are about our three commodities
+                page_header = "\n".join(text.splitlines()[:5]).lower()
+                if any(kw in page_header for kw in _COMMODITY_KEYWORDS):
+                    num_lines = [l for l in text.splitlines() if _NUMBER_RE.search(l)]
+                    if num_lines:
+                        table_parts.append(f"[p{i+1}]\n" + "\n".join(num_lines))
+
+    filtered_highlights = _filter_commodity_text("\n\n".join(highlights_parts))
+    table_text = "\n\n".join(table_parts)
+
+    full_text = filtered_highlights
+    if table_text:
+        full_text += "\n\n=== SUPPLY/DEMAND TABLES ===\n" + table_text
+
     logger.info(
-        f"Extracted {len(raw_text):,} chars from first {len(text_parts)} pages; "
-        f"{len(filtered):,} chars after commodity filter"
+        f"Highlights: {len(filtered_highlights):,} chars (pages 1-{_HIGHLIGHTS_END}); "
+        f"Tables: {len(table_text):,} chars (pages {_HIGHLIGHTS_END+1}-{_TABLES_END}); "
+        f"Total: {len(full_text):,} chars"
     )
-    return filtered
+    return full_text
 
 
 def get_wasde_text(year: int, month: int) -> str | None:
     """
-    End-to-end: fetch PDF and return extracted text (highlights pages, commodity-filtered).
+    End-to-end: fetch PDF and return extracted text ready for LLM.
     """
     pdf_bytes = fetch_wasde_pdf(year, month)
     if not pdf_bytes:

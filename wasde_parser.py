@@ -19,7 +19,10 @@ client = Groq(api_key=GROQ_API_KEY)
 
 
 EXTRACTION_PROMPT = """
-You are an agricultural commodities analyst. Below is the raw text of a USDA WASDE report.
+You are an agricultural commodities analyst. Below is a USDA WASDE report in two sections:
+1. HIGHLIGHTS (pages 1-5): narrative text summarizing key changes — use this for key_changes.
+2. SUPPLY/DEMAND TABLES: number-only lines from commodity tables — use these for the numeric fields (production, ending_stocks).
+In the tables, columns are ordered oldest-to-newest crop year; "prior" = second-to-last column, "current" = last column.
 
 Extract the following data and return ONLY a valid JSON object (no markdown, no explanation):
 
