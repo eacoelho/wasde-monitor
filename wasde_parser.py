@@ -1,244 +1,368 @@
 """
 wasde_parser.py
-Uses Groq LLM to extract structured supply/demand data from raw WASDE text.
-Returns a dict with production and ending stocks for soy, corn, wheat.
+Parses the USDA WASDE v2 XML file directly into a structured dict.
+No LLM required — reads data from XML using xml.etree.ElementTree.
 
-This approach is intentionally format-agnostic — if the USDA changes
-PDF layout (as in May crop-year flip), the LLM still interprets it correctly.
+XML structure (per commodity section):
+  <srNN><Report Name="srNN" Report_Month="June 2026">
+    <matrix3 region_header2="2026/27 Proj.">  ← soybeans (sr28) uses matrix3 / suffix 2
+      <m1_region_group3_Collection>
+        <m1_region_group3 region2="World  2/">
+          <m1_month_group2_Collection>
+            <m1_month_group2 forecast_month2="Jun">
+              <m1_attribute_group3_Collection>
+                <m1_attribute_group3 attribute2="Production">
+                  <Cell cell_value2="441.34" />
+
+    <matrix1 region_header1="2026/27 Proj.">  ← corn/wheat (sr22/sr18) uses matrix1 / suffix 1
+      <m1_region_group_Collection>
+        <m1_region_group region1="World  3/">
+          <m1_month_group_Collection>
+            <m1_month_group forecast_month1="Jun">
+              <m1_attribute_group_Collection>
+                <m1_attribute_group attribute1="Production">
+                  <FormatFiller3><Cell cell_value1="1,300.38" /></FormatFiller3>
 """
 
-import json
-import logging
 import re
+import logging
+import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
-# ── Provider config (read once at import) ─────────────────────────────────────
-try:
-    from config import LLM_PROVIDER as _PROVIDER
-except ImportError:
-    _PROVIDER = "groq"
+# ── Section IDs ───────────────────────────────────────────────────────────────
+# The WASDE XML splits each commodity into two sections:
+#   base section  — historical data (2024/25, 2025/26 Est.)
+#   cont section  — current crop year projections (2026/27 Proj.)
+# For non-May reports both prior and current months live in the cont section.
+# For May reports the prior year must be fetched from the base section.
+_SECTIONS = {
+    "soybeans": {"cont": "sr28", "base": "sr28"},  # soybeans is combined in one section
+    "corn":     {"cont": "sr23", "base": "sr22"},
+    "wheat":    {"cont": "sr19", "base": "sr18"},
+}
 
-_PROVIDER = _PROVIDER.lower()
+# ── Month helpers ─────────────────────────────────────────────────────────────
+_MONTH_ORDER = {
+    "Jan":1, "Feb":2, "Mar":3, "Apr":4,  "May":5,  "Jun":6,
+    "Jul":7, "Aug":8, "Sep":9, "Oct":10, "Nov":11, "Dec":12,
+}
 
-# Groq client (only initialised when provider = groq)
-_groq_client = None
-if _PROVIDER == "groq":
-    from groq import Groq
-    from config import GROQ_API_KEY, LLM_MODEL as _GROQ_MODEL
-    _groq_client = Groq(api_key=GROQ_API_KEY)
+_MONTH_PT = {
+    1:"Janeiro", 2:"Fevereiro", 3:"Março",    4:"Abril",
+    5:"Maio",    6:"Junho",     7:"Julho",     8:"Agosto",
+    9:"Setembro",10:"Outubro",  11:"Novembro", 12:"Dezembro",
+}
 
-# Gemini client (only initialised when provider = gemini)
-_gemini_client     = None
-_GEMINI_MODEL_NAME = None
-if _PROVIDER == "gemini":
+_MONTH_EN = {
+    1:"January", 2:"February", 3:"March",     4:"April",
+    5:"May",     6:"June",     7:"July",       8:"August",
+    9:"September",10:"October",11:"November",  12:"December",
+}
+
+# Attributes we care about (after whitespace normalisation)
+_TARGET_ATTRIBUTES = {"Production", "Ending Stocks"}
+
+
+# ── Normalisation helpers ─────────────────────────────────────────────────────
+
+def _norm_region(raw: str) -> str:
+    """Strip leading/trailing spaces and trailing footnote markers like '  2/'."""
+    s = raw.strip()
+    return re.sub(r'\s+\d+/\s*$', '', s).strip()
+
+
+def _norm_attr(raw: str) -> str:
+    """Collapse whitespace and \\r\\n (encoded as &#xD;&#xA; in XML) to a single space."""
+    return re.sub(r'[\r\n\s]+', ' ', raw).strip()
+
+
+def _parse_float(s: str | None) -> float | None:
+    """Parse a cell value, stripping comma thousands separators (e.g. '1,300.38')."""
+    if not s:
+        return None
     try:
-        from google import genai as _genai
-        from google.genai import types as _genai_types
-        from config import GEMINI_API_KEY, GEMINI_MODEL as _GEMINI_MODEL_NAME
-        _gemini_client = _genai.Client(api_key=GEMINI_API_KEY)
-        logger.info(f"LLM provider: Gemini ({_GEMINI_MODEL_NAME})")
-    except ImportError:
-        raise RuntimeError(
-            "LLM_PROVIDER='gemini' requires the google-genai package. "
-            "Install it with: pip install google-genai"
-        )
+        return float(s.replace(",", ""))
+    except (ValueError, AttributeError):
+        return None
 
 
-EXTRACTION_PROMPT = """
-You are an agricultural commodities analyst. Below is a USDA WASDE report in two sections:
-1. HIGHLIGHTS (pages 1-5): narrative text with key changes — use for key_changes only.
-2. SUPPLY/DEMAND TABLES: key rows from commodity-specific tables — use for all numeric fields.
+# ── Matrix parser ─────────────────────────────────────────────────────────────
 
-TABLE READING RULES:
-- Columns are ordered oldest-to-newest crop year; "prior" = second-to-last column, "current" = last column.
-- For SOYBEANS: use only the SOYBEANS table (world production ~420-450 MMT). Do NOT use the Oilseeds summary (~640-700 MMT).
-- For CORN: use only the CORN table (world production ~1,200-1,400 MMT). Do NOT use the Coarse Grains summary (~1,450-1,600 MMT).
-- For WHEAT: use only the WHEAT table (world production ~780-840 MMT).
-- World-row values in these tables are already in MMT.
-- US production rows are in MILLION BUSHELS — always convert before returning.
-
-Extract the following data and return ONLY a valid JSON object (no markdown, no explanation):
-
-{{
-  "report_month": "Month Year",  // e.g. "Junho 2026"
-  "report_month_en": "Month Year",  // e.g. "June 2026"
-  "is_crop_year_flip": true/false,  // true if this is the May report (new crop year introduced)
-  "crop_years_shown": ["25/26", "26/27"],  // list the crop years present in the report
-  "soybeans": {{
-    "production": {{
-      "usa_prior": X,      // previous month estimate
-      "usa_current": X,    // this month estimate
-      "brazil_prior": X,
-      "brazil_current": X,
-      "argentina_prior": X,
-      "argentina_current": X,
-      "world_prior": X,
-      "world_current": X
-    }},
-    "ending_stocks": {{
-      "usa_prior": X,
-      "usa_current": X,
-      "world_prior": X,
-      "world_current": X
-    }}
-  }},
-  "corn": {{
-    "production": {{
-      "usa_prior": X,
-      "usa_current": X,
-      "brazil_prior": X,
-      "brazil_current": X,
-      "argentina_prior": X,
-      "argentina_current": X,
-      "world_prior": X,
-      "world_current": X
-    }},
-    "ending_stocks": {{
-      "usa_prior": X,
-      "usa_current": X,
-      "world_prior": X,
-      "world_current": X
-    }}
-  }},
-  "wheat": {{
-    "production": {{
-      "usa_prior": X,
-      "usa_current": X,
-      "world_prior": X,
-      "world_current": X
-    }},
-    "ending_stocks": {{
-      "usa_prior": X,
-      "usa_current": X,
-      "world_prior": X,
-      "world_current": X
-    }}
-  }},
-  "key_changes": [
-    // EXACTLY 3 bullets in Portuguese (pt-BR) — one per commodity: soja, milho, trigo.
-    // Always mention the crop year (e.g. "safra 2026/27"). Use MMT values. NEVER bushels.
-    // 1-2 sentences, concise, analytical.
-    "• Soja: safra 2026/27 ...",
-    "• Milho: safra 2026/27 ...",
-    "• Trigo: safra 2026/27 ..."
-  ]
-}}
-
-Use null for any value that cannot be found.
-ALL numbers in the JSON must be in million metric tons (MMT). NEVER write mathematical expressions — always write ONLY the final computed number.
-UNIT RULES:
-- World rows in the tables are already in MMT. Copy them directly.
-- Brazil and Argentina rows are already in MMT. Copy them directly.
-- US rows marked "(Million Bushels)" need conversion — compute internally:
-    corn:         million bushels ÷ 39.368 = MMT
-    soybeans:     million bushels ÷ 36.744 = MMT
-    wheat:        million bushels ÷ 36.744 = MMT
-  Example: 4374 million bushels soybeans → 4374 ÷ 36.744 = 119.0 → write 119.0
-Prior = previous month's estimate. Current = this month's revised estimate.
-For the May report (crop year flip), use the MOST RECENT crop year's data for "current" and the prior month's old crop year data for "prior" where applicable. Note differences in key_changes.
-
-WASDE REPORT TEXT:
-{text}
-"""
-
-
-def _clean_json(raw: str) -> str:
+def _parse_matrix(matrix_elem: ET.Element) -> dict:
     """
-    Normalises common LLM JSON formatting issues before parsing.
+    Parses a matrix1 or matrix3 element.
 
-    Handles (in order):
-    1. Markdown code fences  ``` json ... ```
-    2. JS-style // line comments
-    3. JS-style /* */ block comments
-    4. Comma as thousands separator inside numbers  e.g. 4,461 → 4461
-    5. Trailing commas before } or ]
-    6. Extract the outermost {...} in case the model adds prose around it
+    Returns:
+        { normalised_region: { month_abbr: { normalised_attr: float } } }
+
+    Only TARGET_ATTRIBUTES and regions that have data are kept.
     """
-    # 1. Markdown fences
-    raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-    # 2. // line comments
-    raw = re.sub(r"\s*//[^\n]*", "", raw)
-    # 3. /* */ block comments
-    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
-    # 4. Thousands-separator commas inside numbers: "4,461" → "4461"
-    #    Matches a comma between a digit and exactly 3 digits followed by non-digit
-    for _ in range(3):                       # up to 3 passes for 7-digit numbers
-        raw = re.sub(r"(?<=\d),(?=\d{3}(?:[^0-9]|$))", "", raw)
-    # 5. Evaluate bare division expressions left by LLM showing conversion work
-    #    e.g.  4374 / 36.744  →  119.043  (spaces required to avoid "25/26" strings)
-    def _eval_div(m):
-        try:
-            return str(round(float(m.group(1)) / float(m.group(2)), 3))
-        except Exception:
-            return m.group(0)
-    raw = re.sub(r'(\d+\.?\d*)\s+/\s+(\d+\.?\d+)', _eval_div, raw)
-    # 6. Trailing commas
-    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
-    # 7. Extract JSON object if prose surrounds it
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if m:
-        raw = m.group(0)
-    return raw
+    is3 = matrix_elem.tag == "matrix3"
+    s   = "2" if is3 else "1"          # attribute suffix
+    n   = "3" if is3 else ""           # element name suffix (for group tags)
+
+    rg_coll_tag = f"m1_region_group{n}_Collection"
+    rg_tag      = f"m1_region_group{n}"
+    mg_coll_tag = f"m1_month_group{s if is3 else ''}_Collection"
+    mg_tag      = f"m1_month_group{s if is3 else ''}"
+    ag_coll_tag = f"m1_attribute_group{n}_Collection"
+    ag_tag      = f"m1_attribute_group{n}"
+
+    result = {}
+
+    rg_coll = matrix_elem.find(rg_coll_tag)
+    if rg_coll is None:
+        return result
+
+    for rg in rg_coll.findall(rg_tag):
+        region = _norm_region(rg.get(f"region{s}", ""))
+        if not region:
+            continue
+
+        mg_coll_elem = rg.find(mg_coll_tag)
+        if mg_coll_elem is None:
+            continue
+
+        months = {}
+        for mg in mg_coll_elem.findall(mg_tag):
+            month = mg.get(f"forecast_month{s}", "")
+            if month not in _MONTH_ORDER:
+                continue
+
+            ag_coll_elem = mg.find(ag_coll_tag)
+            if ag_coll_elem is None:
+                continue
+
+            attrs = {}
+            for ag in ag_coll_elem.findall(ag_tag):
+                raw_attr = ag.get(f"attribute{s}", "")
+                attr = _norm_attr(raw_attr)
+                # Match targets; allow trailing footnote suffix (e.g., "Ending Stocks  2/")
+                matched = next(
+                    (t for t in _TARGET_ATTRIBUTES
+                     if attr == t or attr.startswith(t + " ") or attr.startswith(t + "\r") or attr.startswith(t + "\n")),
+                    None
+                )
+                if matched is None:
+                    continue
+                cell = ag.find(".//Cell")
+                if cell is None:
+                    continue
+                val = _parse_float(cell.get(f"cell_value{s}"))
+                if val is not None:
+                    attrs[matched] = val
+
+            if attrs:
+                months[month] = attrs
+
+        if months:
+            result[region] = months
+
+    return result
 
 
-def _call_llm(prompt: str) -> str:
-    """Route the prompt to the configured LLM provider and return raw text."""
-    if _PROVIDER == "gemini":
-        response = _gemini_client.models.generate_content(
-            model=_GEMINI_MODEL_NAME,
-            contents=prompt,
-            config=_genai_types.GenerateContentConfig(
-                temperature=0.1,
-                max_output_tokens=3000,
-            ),
-        )
-        return response.text.strip()
-    # Default: Groq
-    response = _groq_client.chat.completions.create(
-        model=_GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
-        max_tokens=3000,
+# ── Matrix finder ─────────────────────────────────────────────────────────────
+
+def _find_matrices(section_elem: ET.Element) -> tuple[ET.Element | None, ET.Element | None]:
+    """
+    Scans a section's Report element for matrix elements.
+
+    Returns:
+        (proj_matrix, prev_matrix)
+        proj_matrix  = matrix whose region_header contains "Proj." (current crop year)
+        prev_matrix  = last matrix whose region_header contains "Est." before proj_matrix
+    """
+    proj     = None
+    last_est = None
+
+    for child in section_elem.iter():
+        if child.tag not in ("matrix1", "matrix2", "matrix3", "matrix5"):
+            continue
+        for sfx in ("1", "2"):
+            header = child.get(f"region_header{sfx}", "")
+            if "Proj." in header:
+                if proj is None:
+                    proj = child
+                break
+            elif "Est." in header and proj is None:
+                # Only collect Est. matrices before the Proj. one
+                last_est = child
+                break
+
+    return proj, last_est
+
+
+# ── Month ordering ────────────────────────────────────────────────────────────
+
+def _sort_months(month_keys) -> list[str]:
+    return sorted(month_keys, key=lambda m: _MONTH_ORDER.get(m, 99))
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def parse_wasde_xml(xml_bytes: bytes, report_year: int, report_month: int) -> dict | None:
+    """
+    Parses the full WASDE v2 XML and returns a structured dict.
+
+    Result shape:
+    {
+        "report_year":       int,
+        "report_month":      int,
+        "report_month_en":   "June 2026",
+        "report_month_pt":   "Junho 2026",
+        "crop_year":         "2026/27",
+        "current_month_name": "Jun",
+        "prior_month_name":  "May",     # None for May report
+        "is_may_report":     bool,
+        "soybeans": {
+            "World": {
+                "Production":    {"current": 441.34, "prior": 441.54},
+                "Ending Stocks": {"current": 124.88, "prior": 124.78},
+            },
+            "United States": { ... },
+            "Brazil": { ... },
+            "Argentina": { ... },
+        },
+        "corn":  { same structure },
+        "wheat": { same structure },
+    }
+    """
+    try:
+        if xml_bytes.startswith(b'\xef\xbb\xbf'):
+            xml_bytes = xml_bytes[3:]   # strip UTF-8 BOM
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as e:
+        logger.error(f"XML parse error: {e}")
+        return None
+
+    report_month_en = f"{_MONTH_EN.get(report_month, '')} {report_year}"
+    report_month_pt = f"{_MONTH_PT.get(report_month, '')} {report_year}"
+
+    # Try to get the report month label directly from XML
+    sr08_report = root.find("sr08/Report")
+    if sr08_report is not None:
+        rm = sr08_report.get("Report_Month", "")
+        if rm:
+            report_month_en = rm
+
+    result = {
+        "report_year":     report_year,
+        "report_month":    report_month,
+        "report_month_en": report_month_en,
+        "report_month_pt": report_month_pt,
+    }
+
+    crop_year          = None
+    current_month_name = None
+    prior_month_name   = None
+    is_may_report      = False
+
+    for commodity, ids in _SECTIONS.items():
+        cont_id = ids["cont"]
+        base_id = ids["base"]
+
+        cont_report = root.find(f"{cont_id}/Report")
+        if cont_report is None:
+            logger.warning(f"Section {cont_id} ({commodity}) not found in XML")
+            result[commodity] = {}
+            continue
+
+        proj_matrix, _ = _find_matrices(cont_report)
+        if proj_matrix is None:
+            logger.warning(f"No projected crop-year matrix found in {cont_id}")
+            result[commodity] = {}
+            continue
+
+        # Extract crop year label (e.g. "2026/27 Proj." → "2026/27")
+        if crop_year is None:
+            for sfx in ("1", "2"):
+                hdr = proj_matrix.get(f"region_header{sfx}", "")
+                if hdr:
+                    crop_year = re.sub(r'\s+Proj\..*$', '', hdr).strip()
+                    break
+
+        proj_data = _parse_matrix(proj_matrix)
+
+        # Determine which months are available in the projected matrix
+        all_months: set[str] = set()
+        for region_data in proj_data.values():
+            all_months.update(region_data.keys())
+        sorted_months = _sort_months(list(all_months))
+
+        if len(sorted_months) >= 2:
+            cur_m  = sorted_months[-1]
+            prev_m = sorted_months[-2]
+        elif len(sorted_months) == 1:
+            cur_m         = sorted_months[0]
+            prev_m        = None
+            is_may_report = True
+        else:
+            logger.warning(f"No months found in projected matrix for {cont_id}")
+            result[commodity] = {}
+            continue
+
+        # Record globally (all sections should agree)
+        if current_month_name is None:
+            current_month_name = cur_m
+            prior_month_name   = prev_m
+
+        # For May report: pull prior values from the base (prior crop year) section
+        prev_data: dict = {}
+        if is_may_report:
+            base_report = root.find(f"{base_id}/Report")
+            if base_report is not None:
+                _, prev_matrix = _find_matrices(base_report)
+                if prev_matrix is not None:
+                    prev_data = _parse_matrix(prev_matrix)
+
+        # Build per-region attribute dict
+        commodity_result: dict = {}
+        for region, months_data in proj_data.items():
+            cur_attrs  = months_data.get(cur_m,  {})
+            prev_attrs = months_data.get(prev_m, {}) if prev_m else {}
+
+            if is_may_report:
+                prev_region = prev_data.get(region, {})
+                if prev_region:
+                    last_prev_month = _sort_months(list(prev_region.keys()))[-1]
+                    prev_attrs = prev_region[last_prev_month]
+
+            if not cur_attrs:
+                continue
+
+            attr_dict: dict = {}
+            for attr in _TARGET_ATTRIBUTES:
+                cur_val  = cur_attrs.get(attr)
+                prev_val = prev_attrs.get(attr)
+                if cur_val is not None:
+                    attr_dict[attr] = {"current": cur_val, "prior": prev_val}
+
+            if attr_dict:
+                commodity_result[region] = attr_dict
+
+        result[commodity] = commodity_result
+
+    result["crop_year"]          = crop_year or "?"
+    result["current_month_name"] = current_month_name
+    result["prior_month_name"]   = prior_month_name
+    result["is_may_report"]      = is_may_report
+
+    logger.info(
+        f"Parsed: {report_month_en} | crop_year={crop_year} | "
+        f"months={prior_month_name}→{current_month_name} | may_report={is_may_report}"
     )
-    return response.choices[0].message.content.strip()
+    return result
 
 
-def extract_wasde_data(wasde_text: str) -> dict | None:
-    """Sends WASDE text to the configured LLM and returns parsed JSON dict."""
-    truncated = wasde_text[:50000]
-    prompt = EXTRACTION_PROMPT.format(text=truncated)
-
-    for attempt in range(3):
-        try:
-            raw = _call_llm(prompt)
-            raw = _clean_json(raw)
-
-            data = json.loads(raw)
-            logger.info("WASDE data extracted successfully by LLM.")
-            return data
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error on attempt {attempt+1}: {e} | raw[:300]: {raw[:300]!r}")
-            if attempt == 2:
-                logger.error("All extraction attempts failed (JSON).")
-                return {"parse_error": True, "raw_response": raw}
-        except Exception as e:
-            logger.error(f"LLM extraction error on attempt {attempt+1}: {e}")
-            if attempt == 2:
-                return None
-
-    return None
-
-
-def format_delta(prior, current) -> tuple[float | None, str]:
-    """Returns (delta_value, formatted_string) using pt-BR decimal comma."""
+def fmt_delta(prior: float | None, current: float | None) -> tuple[float | None, str]:
+    """Returns (delta_float, pt-BR formatted string) e.g. (0.1, '+0,1')."""
     if prior is None or current is None:
         return None, "n/d"
-    delta = round(current - prior, 1)
-    if delta > 0:
-        return delta, f"+{delta:.1f}".replace(".", ",")
-    elif delta < 0:
-        return delta, f"{delta:.1f}".replace(".", ",")
-    else:
-        return 0.0, "0,0"
+    delta = round(current - prior, 2)
+    d1 = round(delta, 1)
+    if d1 > 0:
+        return delta, f"+{d1:.1f}".replace(".", ",")
+    elif d1 < 0:
+        return delta, f"{d1:.1f}".replace(".", ",")
+    return 0.0, "0,0"
