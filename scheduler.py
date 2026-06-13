@@ -1,5 +1,5 @@
 """
-scheduler.py
+scheduler.pyy
 Runs as a persistent daemon on the VPS.
 Checks every minute whether a WASDE release is due.
 
