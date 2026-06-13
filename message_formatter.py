@@ -208,8 +208,14 @@ def build_telegram_message(data: dict, market_prices: dict) -> str:
         lines.extend(_build_commodity_section(commodity_key, commodity_data, delta_label, crop_year))
 
     # ── Market prices ─────────────────────────────────────────────────────────
-    fetch_time = market_prices.get("_fetch_time_brt", "")
-    time_label = f" (às {fetch_time})" if fetch_time else ""
+    # Use the Yahoo Finance last-trade time from the first available commodity
+    price_time = next(
+        (market_prices[lbl]["price_time"]
+         for lbl in ("Soja", "Milho", "Trigo")
+         if market_prices.get(lbl, {}).get("price_time")),
+        None,
+    )
+    time_label = f" (às {price_time})" if price_time else ""
     lines += ["", f"*💹 Mercado agora{time_label}:*"]
 
     for label in ("Soja", "Milho", "Trigo"):

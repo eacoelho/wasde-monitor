@@ -21,32 +21,35 @@ def get_grain_prices() -> dict:
 
     Returns dict:
     {
-        "Soja":  {"price": 1113.25, "pct_change": -0.18, "contract": "Jul/26", "ticker": "ZS=F"},
+        "Soja":  {"price": 1113.25, "pct_change": -0.18, "price_time": "14h19",
+                  "contract": "Jul/26", "ticker": "ZS=F"},
         "Milho": {...},
         "Trigo": {...},
-        "_fetch_time_brt": "14:00:00",
     }
+    price_time is the BRT timestamp of the last trade reported by Yahoo Finance.
     """
     result = {}
-    fetch_time = datetime.now(timezone.utc).astimezone(TZ_BRASILIA).strftime("%H:%M:%S")
 
     for commodity, ticker in GRAIN_TICKERS.items():
         try:
-            tkr = yf.Ticker(ticker)
-            price     = None
-            pct       = None
-            contract  = _infer_contract(ticker)
+            tkr      = yf.Ticker(ticker)
+            price    = None
+            pct      = None
+            pt       = None
+            contract = _infer_contract(ticker)
 
             try:
-                fi        = tkr.fast_info
-                price     = fi.last_price
-                prev      = fi.previous_close
+                fi    = tkr.fast_info
+                price = fi.last_price
+                prev  = fi.previous_close
                 if price and price > 0:
                     if prev and prev > 0:
                         pct = round((price / prev - 1) * 100, 2)
+                    pt = _quote_time_brt(fi)
                     result[commodity] = {
                         "price":      round(price, 2),
                         "pct_change": pct,
+                        "price_time": pt,
                         "contract":   contract,
                         "ticker":     ticker,
                     }
@@ -61,22 +64,52 @@ def get_grain_prices() -> dict:
                 price  = float(closes.iloc[-1])
                 if len(closes) >= 2:
                     pct = round((closes.iloc[-1] / closes.iloc[-2] - 1) * 100, 2)
+                # Try to get timestamp from history index
+                try:
+                    last_ts = hist.index[-1]
+                    pt = last_ts.astimezone(TZ_BRASILIA).strftime("%Hh%M")
+                except Exception:
+                    pt = None
                 result[commodity] = {
                     "price":      round(price, 2),
                     "pct_change": pct,
+                    "price_time": pt,
                     "contract":   contract,
                     "ticker":     ticker,
                 }
             else:
                 logger.warning(f"No price data for {ticker}")
-                result[commodity] = {"price": None, "pct_change": None, "contract": "?", "ticker": ticker}
+                result[commodity] = {
+                    "price": None, "pct_change": None, "price_time": None,
+                    "contract": "?", "ticker": ticker,
+                }
 
         except Exception as e:
             logger.error(f"Error fetching {ticker}: {e}")
-            result[commodity] = {"price": None, "pct_change": None, "contract": "?", "ticker": ticker}
+            result[commodity] = {
+                "price": None, "pct_change": None, "price_time": None,
+                "contract": "?", "ticker": ticker,
+            }
 
-    result["_fetch_time_brt"] = fetch_time
     return result
+
+
+def _quote_time_brt(fast_info) -> str | None:
+    """
+    Extracts the last-trade timestamp from fast_info and converts it to BRT.
+    Returns a string like '14h19' or None if unavailable.
+    """
+    try:
+        ts = fast_info.regular_market_time   # may be int (unix) or datetime
+        if ts is None:
+            return None
+        if isinstance(ts, (int, float)):
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ_BRASILIA)
+        else:
+            dt = ts.astimezone(TZ_BRASILIA)
+        return dt.strftime("%Hh%M")
+    except (AttributeError, TypeError, OSError, ValueError):
+        return None
 
 
 def _infer_contract(ticker: str) -> str:
