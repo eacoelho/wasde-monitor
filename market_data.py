@@ -13,6 +13,7 @@ from config import GRAIN_TICKERS
 logger = logging.getLogger(__name__)
 
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
+TZ_ET       = ZoneInfo("America/New_York")
 
 
 def get_grain_prices() -> dict:
@@ -45,7 +46,7 @@ def get_grain_prices() -> dict:
                 if price and price > 0:
                     if prev and prev > 0:
                         pct = round((price / prev - 1) * 100, 2)
-                    pt = _quote_time_brt(fi)
+                    pt = _quote_time_et(tkr)
                     result[commodity] = {
                         "price":      round(price, 2),
                         "pct_change": pct,
@@ -94,22 +95,28 @@ def get_grain_prices() -> dict:
     return result
 
 
-def _quote_time_brt(fast_info) -> str | None:
+def _quote_time_et(tkr) -> str | None:
     """
-    Extracts the last-trade timestamp from fast_info and converts it to BRT.
-    Returns a string like '14h19' or None if unavailable.
+    Returns the last-trade time shown by Yahoo Finance, formatted as 'HHhMM' in ET.
+    E.g. Yahoo shows 'At close: June 12 at 2:19:59 PM EDT' → '14h19'.
     """
+    # Primary: regularMarketTime from tkr.info (Unix timestamp UTC)
     try:
-        ts = fast_info.regular_market_time   # may be int (unix) or datetime
-        if ts is None:
-            return None
-        if isinstance(ts, (int, float)):
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ_BRASILIA)
-        else:
-            dt = ts.astimezone(TZ_BRASILIA)
-        return dt.strftime("%Hh%M")
-    except (AttributeError, TypeError, OSError, ValueError):
-        return None
+        ts = tkr.info.get("regularMarketTime")
+        if ts:
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(TZ_ET)
+            return f"{dt.hour}h{dt.minute:02d}"
+    except Exception:
+        pass
+    # Fallback: last 1-minute bar (index already carries exchange TZ)
+    try:
+        hist = tkr.history(period="1d", interval="1m")
+        if not hist.empty:
+            last_ts = hist.index[-1]
+            return f"{last_ts.hour}h{last_ts.minute:02d}"
+    except Exception:
+        pass
+    return None
 
 
 def _infer_contract(ticker: str) -> str:
