@@ -29,21 +29,19 @@ if _PROVIDER == "groq":
     _groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Gemini client (only initialised when provider = gemini)
-_gemini_model = None
+_gemini_client     = None
+_GEMINI_MODEL_NAME = None
 if _PROVIDER == "gemini":
     try:
-        import google.generativeai as _genai
+        from google import genai as _genai
+        from google.genai import types as _genai_types
         from config import GEMINI_API_KEY, GEMINI_MODEL as _GEMINI_MODEL_NAME
-        _genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = _genai.GenerativeModel(
-            model_name=_GEMINI_MODEL_NAME,
-            generation_config={"temperature": 0.1, "max_output_tokens": 3000},
-        )
+        _gemini_client = _genai.Client(api_key=GEMINI_API_KEY)
         logger.info(f"LLM provider: Gemini ({_GEMINI_MODEL_NAME})")
     except ImportError:
         raise RuntimeError(
-            "LLM_PROVIDER='gemini' requires the google-generativeai package. "
-            "Install it with: pip install google-generativeai"
+            "LLM_PROVIDER='gemini' requires the google-genai package. "
+            "Install it with: pip install google-genai"
         )
 
 
@@ -187,7 +185,14 @@ def _clean_json(raw: str) -> str:
 def _call_llm(prompt: str) -> str:
     """Route the prompt to the configured LLM provider and return raw text."""
     if _PROVIDER == "gemini":
-        response = _gemini_model.generate_content(prompt)
+        response = _gemini_client.models.generate_content(
+            model=_GEMINI_MODEL_NAME,
+            contents=prompt,
+            config=_genai_types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=3000,
+            ),
+        )
         return response.text.strip()
     # Default: Groq
     response = _groq_client.chat.completions.create(

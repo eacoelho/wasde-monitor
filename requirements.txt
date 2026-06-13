@@ -4,5 +4,5 @@ requests>=2.31.0
 groq>=0.9.0
 yfinance>=0.2.40
 pydub>=0.25.1
-google-generativeai
+google-genai
 # schedule is not needed — custom scheduler loop is in scheduler.py
