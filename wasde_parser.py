@@ -20,9 +20,16 @@ client = Groq(api_key=GROQ_API_KEY)
 
 EXTRACTION_PROMPT = """
 You are an agricultural commodities analyst. Below is a USDA WASDE report in two sections:
-1. HIGHLIGHTS (pages 1-5): narrative text summarizing key changes — use this for key_changes.
-2. SUPPLY/DEMAND TABLES: number-only lines from commodity tables — use these for the numeric fields (production, ending_stocks).
-In the tables, columns are ordered oldest-to-newest crop year; "prior" = second-to-last column, "current" = last column.
+1. HIGHLIGHTS (pages 1-5): narrative text with key changes — use for key_changes only.
+2. SUPPLY/DEMAND TABLES: key rows from commodity-specific tables — use for all numeric fields.
+
+TABLE READING RULES:
+- Columns are ordered oldest-to-newest crop year; "prior" = second-to-last column, "current" = last column.
+- For SOYBEANS: use only the SOYBEANS table (world production ~420-450 MMT). Do NOT use the Oilseeds summary (~640-700 MMT).
+- For CORN: use only the CORN table (world production ~1,200-1,400 MMT). Do NOT use the Coarse Grains summary (~1,450-1,600 MMT).
+- For WHEAT: use only the WHEAT table (world production ~780-840 MMT).
+- World-row values in these tables are already in MMT.
+- US production rows are in MILLION BUSHELS — always convert before returning.
 
 Extract the following data and return ONLY a valid JSON object (no markdown, no explanation):
 
@@ -82,12 +89,12 @@ Extract the following data and return ONLY a valid JSON object (no markdown, no 
     }}
   }},
   "key_changes": [
-    // EXACTLY 3 bullet points in Portuguese (pt-BR) — one per commodity in this order: soja, milho, trigo.
-    // Each bullet summarizes the most important production or stocks revision for that commodity.
-    // Concise analytical tone, 1-2 sentences. Use ONLY metric tons — NEVER bushels.
-    "• Soja: ...",
-    "• Milho: ...",
-    "• Trigo: ..."
+    // EXACTLY 3 bullets in Portuguese (pt-BR) — one per commodity: soja, milho, trigo.
+    // Always mention the crop year (e.g. "safra 2026/27"). Use MMT values. NEVER bushels.
+    // 1-2 sentences, concise, analytical.
+    "• Soja: safra 2026/27 ...",
+    "• Milho: safra 2026/27 ...",
+    "• Trigo: safra 2026/27 ..."
   ]
 }}
 
@@ -128,6 +135,8 @@ def extract_wasde_data(wasde_text: str) -> dict | None:
 
             # Strip markdown fences if present
             raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+            # Strip // comments the LLM may copy from the prompt template
+            raw = re.sub(r"\s*//[^\n]*", "", raw)
 
             data = json.loads(raw)
             logger.info("WASDE data extracted successfully by LLM.")
@@ -147,15 +156,13 @@ def extract_wasde_data(wasde_text: str) -> dict | None:
 
 
 def format_delta(prior, current) -> tuple[float | None, str]:
-    """
-    Returns (delta_value, formatted_string).
-    """
+    """Returns (delta_value, formatted_string) using pt-BR decimal comma."""
     if prior is None or current is None:
         return None, "n/d"
-    delta = round(current - prior, 2)
+    delta = round(current - prior, 1)
     if delta > 0:
-        return delta, f"+{delta:.1f}"
+        return delta, f"+{delta:.1f}".replace(".", ",")
     elif delta < 0:
-        return delta, f"{delta:.1f}"
+        return delta, f"{delta:.1f}".replace(".", ",")
     else:
         return 0.0, "0,0"

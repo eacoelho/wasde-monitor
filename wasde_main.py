@@ -5,7 +5,6 @@ Called by the scheduler when a WASDE release is detected.
 """
 
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
