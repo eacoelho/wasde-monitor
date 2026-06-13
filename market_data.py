@@ -1,5 +1,5 @@
 """
-market_data.pyy
+market_data.py
 Fetches current grain futures prices from Yahoo Finance.
 Returns prices in cents/bushel as displayed on CBOT.
 """
