@@ -60,8 +60,17 @@ _MONTH_EN = {
     9:"September",10:"October",11:"November",  12:"December",
 }
 
-# Attributes we care about (after whitespace normalisation)
-_TARGET_ATTRIBUTES = {"Production", "Ending Stocks"}
+# Attributes we care about (after whitespace normalisation).
+# Order matters: longer names first to avoid spurious prefix matches.
+_TARGET_ATTRIBUTES = [
+    "Ending Stocks",
+    "Production",
+    "Exports",
+    "Imports",
+    "Domestic Total",   # matches "Domestic Total", "Domestic Total 2/", etc.
+    "Domestic Crush",   # soybeans crush
+    "Domestic Feed",    # corn/wheat feed use
+]
 
 
 # ── Normalisation helpers ─────────────────────────────────────────────────────
@@ -138,10 +147,10 @@ def _parse_matrix(matrix_elem: ET.Element) -> dict:
             for ag in ag_coll_elem.findall(ag_tag):
                 raw_attr = ag.get(f"attribute{s}", "")
                 attr = _norm_attr(raw_attr)
-                # Match targets; allow trailing footnote suffix (e.g., "Ending Stocks  2/")
+                # Match targets; allow trailing footnote suffix (e.g., "Domestic Total 2/")
                 matched = next(
                     (t for t in _TARGET_ATTRIBUTES
-                     if attr == t or attr.startswith(t + " ") or attr.startswith(t + "\r") or attr.startswith(t + "\n")),
+                     if attr == t or attr.startswith(t + " ")),
                     None
                 )
                 if matched is None:
@@ -274,12 +283,12 @@ def parse_wasde_xml(xml_bytes: bytes, report_year: int, report_month: int) -> di
             result[commodity] = {}
             continue
 
-        # Extract crop year label (e.g. "2026/27 Proj." → "2026/27")
+        # Extract crop year label — keep "Proj." suffix so the message can show it verbatim
         if crop_year is None:
             for sfx in ("1", "2"):
                 hdr = proj_matrix.get(f"region_header{sfx}", "")
                 if hdr:
-                    crop_year = re.sub(r'\s+Proj\..*$', '', hdr).strip()
+                    crop_year = hdr.strip()   # e.g. "2026/27 Proj."
                     break
 
         proj_data = _parse_matrix(proj_matrix)
