@@ -2,16 +2,17 @@
 scheduler.py
 Runs as a persistent daemon on the VPS.
 Checks every minute whether a WASDE release is due.
-Triggers the pipeline at 12:05 PM ET (17:05 UTC in summer, 18:05 UTC in winter)
-to give USDA a 5-minute buffer after the official 12:00 PM ET release time.
 
-IMPORTANT: ET (Eastern Time) is UTC-4 in summer (DST), UTC-5 in winter (EST).
-We use 17:10 UTC as a safe universal trigger that works in both cases:
-  - Summer (UTC-4): 17:10 UTC = 13:10 ET  → 10 min after release ✓
-  - Winter (UTC-5): 17:10 UTC = 12:10 ET  → 10 min after release ✓
+Trigger logic:
+  - The WASDE is released at 12:00 PM ET (Eastern Time).
+  - ET = UTC-4 during DST (Mar–Nov), UTC-5 during EST (Nov–Mar).
+  - Rather than hardcoding a UTC offset, we convert 12:00 PM ET to UTC
+    dynamically using zoneinfo, so DST transitions are handled automatically.
+  - First attempt starts at exactly 12:00 PM ET. If the PDF is not yet
+    available (404), wasde_fetcher.py retries every 60s for up to 15 minutes.
 
-State persistence: a simple JSON file records which reports have been sent
-to prevent duplicate deliveries on restart.
+State persistence: a JSON file records which reports have been sent,
+preventing duplicate deliveries on VPS restarts.
 """
 
 import json
@@ -19,6 +20,7 @@ import logging
 import time
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from config import RELEASE_DATES_2026
@@ -26,11 +28,12 @@ from wasde_main import run_wasde_pipeline
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = Path(__file__).parent / "wasde_sent.json"
+STATE_FILE  = Path(__file__).parent / "wasde_sent.json"
+TZ_ET       = ZoneInfo("America/New_York")
 
-# Trigger time: 17:10 UTC (safe for both ET summer and winter)
-TRIGGER_HOUR_UTC   = 17
-TRIGGER_MINUTE_UTC = 10
+# WASDE official release time (ET)
+RELEASE_HOUR_ET   = 12
+RELEASE_MINUTE_ET = 0
 
 
 def load_sent_reports() -> set:
@@ -53,19 +56,21 @@ def mark_report_sent(year: int, month: int):
 
 def is_release_day_and_time(now_utc: datetime) -> tuple[bool, int, int]:
     """
-    Checks if today is a WASDE release date AND we're past the trigger time.
+    Checks if today is a WASDE release date AND the current time in ET
+    is at or past 12:00 PM.
     Returns (should_trigger, year, month).
     """
-    today = (now_utc.year, now_utc.month, now_utc.day)
+    # Convert current UTC to ET — handles DST automatically
+    now_et = now_utc.astimezone(TZ_ET)
+    today_et = (now_et.year, now_et.month, now_et.day)
 
     for yr, mo, day in RELEASE_DATES_2026:
-        if (yr, mo, day) == today:
-            # Check if we're at or past the trigger time
-            at_or_past_trigger = (
-                now_utc.hour > TRIGGER_HOUR_UTC or
-                (now_utc.hour == TRIGGER_HOUR_UTC and now_utc.minute >= TRIGGER_MINUTE_UTC)
+        if (yr, mo, day) == today_et:
+            at_or_past_release = (
+                now_et.hour > RELEASE_HOUR_ET or
+                (now_et.hour == RELEASE_HOUR_ET and now_et.minute >= RELEASE_MINUTE_ET)
             )
-            return at_or_past_trigger, yr, mo
+            return at_or_past_release, yr, mo
 
     return False, 0, 0
 
@@ -80,7 +85,7 @@ def run_scheduler():
         ]
     )
 
-    logger.info("WASDE scheduler started. Checking every 60 seconds...")
+    logger.info("WASDE Monitor scheduler started. Checking every 60 seconds...")
 
     while True:
         try:
@@ -92,15 +97,17 @@ def run_scheduler():
                 sent = load_sent_reports()
 
                 if key not in sent:
-                    logger.info(f"WASDE release detected: {mo:02d}/{yr}. Starting pipeline...")
+                    now_et = now_utc.astimezone(TZ_ET)
+                    logger.info(
+                        f"WASDE release detected: {mo:02d}/{yr} "
+                        f"(ET {now_et.strftime('%H:%M')}). Starting pipeline..."
+                    )
                     success = run_wasde_pipeline(yr, mo)
                     if success:
                         mark_report_sent(yr, mo)
                         logger.info(f"Pipeline complete for {mo:02d}/{yr}. Marked as sent.")
                     else:
-                        logger.error(f"Pipeline FAILED for {mo:02d}/{yr}. Will NOT retry automatically.")
-                        # Still mark as sent to avoid infinite retry loop.
-                        # If you want auto-retry, remove this line and add retry logic.
+                        logger.error(f"Pipeline FAILED for {mo:02d}/{yr}.")
                         mark_report_sent(yr, mo)
                 else:
                     logger.debug(f"Report {key} already sent. Skipping.")
