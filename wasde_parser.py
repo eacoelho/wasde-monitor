@@ -114,13 +114,42 @@ WASDE REPORT TEXT:
 """
 
 
+def _clean_json(raw: str) -> str:
+    """
+    Normalises common LLM JSON formatting issues before parsing.
+
+    Handles (in order):
+    1. Markdown code fences  ``` json ... ```
+    2. JS-style // line comments
+    3. JS-style /* */ block comments
+    4. Comma as thousands separator inside numbers  e.g. 4,461 → 4461
+    5. Trailing commas before } or ]
+    6. Extract the outermost {...} in case the model adds prose around it
+    """
+    # 1. Markdown fences
+    raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+    # 2. // line comments
+    raw = re.sub(r"\s*//[^\n]*", "", raw)
+    # 3. /* */ block comments
+    raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
+    # 4. Thousands-separator commas inside numbers: "4,461" → "4461"
+    #    Matches a comma between a digit and exactly 3 digits followed by non-digit
+    for _ in range(3):                       # up to 3 passes for 7-digit numbers
+        raw = re.sub(r"(?<=\d),(?=\d{3}(?:[^0-9]|$))", "", raw)
+    # 5. Trailing commas
+    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
+    # 6. Extract JSON object if prose surrounds it
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if m:
+        raw = m.group(0)
+    return raw
+
+
 def extract_wasde_data(wasde_text: str) -> dict | None:
     """
     Sends WASDE text to Groq LLM and returns parsed JSON dict.
     """
-    # Truncate to ~50k chars to stay within context limits
     truncated = wasde_text[:50000]
-
     prompt = EXTRACTION_PROMPT.format(text=truncated)
 
     for attempt in range(3):
@@ -132,20 +161,16 @@ def extract_wasde_data(wasde_text: str) -> dict | None:
                 max_tokens=3000,
             )
             raw = response.choices[0].message.content.strip()
-
-            # Strip markdown fences if present
-            raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
-            # Strip // comments the LLM may copy from the prompt template
-            raw = re.sub(r"\s*//[^\n]*", "", raw)
+            raw = _clean_json(raw)
 
             data = json.loads(raw)
             logger.info("WASDE data extracted successfully by LLM.")
             return data
 
         except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error on attempt {attempt+1}: {e}")
+            logger.warning(f"JSON parse error on attempt {attempt+1}: {e} | raw[:300]: {raw[:300]!r}")
             if attempt == 2:
-                logger.error("All extraction attempts failed (JSON). Returning raw text.")
+                logger.error("All extraction attempts failed (JSON).")
                 return {"parse_error": True, "raw_response": raw}
         except Exception as e:
             logger.error(f"LLM extraction error on attempt {attempt+1}: {e}")
