@@ -10,12 +10,41 @@ PDF layout (as in May crop-year flip), the LLM still interprets it correctly.
 import json
 import logging
 import re
-from groq import Groq
-from config import GROQ_API_KEY, LLM_MODEL
 
 logger = logging.getLogger(__name__)
 
-client = Groq(api_key=GROQ_API_KEY)
+# ── Provider config (read once at import) ─────────────────────────────────────
+try:
+    from config import LLM_PROVIDER as _PROVIDER
+except ImportError:
+    _PROVIDER = "groq"
+
+_PROVIDER = _PROVIDER.lower()
+
+# Groq client (only initialised when provider = groq)
+_groq_client = None
+if _PROVIDER == "groq":
+    from groq import Groq
+    from config import GROQ_API_KEY, LLM_MODEL as _GROQ_MODEL
+    _groq_client = Groq(api_key=GROQ_API_KEY)
+
+# Gemini client (only initialised when provider = gemini)
+_gemini_model = None
+if _PROVIDER == "gemini":
+    try:
+        import google.generativeai as _genai
+        from config import GEMINI_API_KEY, GEMINI_MODEL as _GEMINI_MODEL_NAME
+        _genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_model = _genai.GenerativeModel(
+            model_name=_GEMINI_MODEL_NAME,
+            generation_config={"temperature": 0.1, "max_output_tokens": 3000},
+        )
+        logger.info(f"LLM provider: Gemini ({_GEMINI_MODEL_NAME})")
+    except ImportError:
+        raise RuntimeError(
+            "LLM_PROVIDER='gemini' requires the google-generativeai package. "
+            "Install it with: pip install google-generativeai"
+        )
 
 
 EXTRACTION_PROMPT = """
@@ -155,22 +184,29 @@ def _clean_json(raw: str) -> str:
     return raw
 
 
+def _call_llm(prompt: str) -> str:
+    """Route the prompt to the configured LLM provider and return raw text."""
+    if _PROVIDER == "gemini":
+        response = _gemini_model.generate_content(prompt)
+        return response.text.strip()
+    # Default: Groq
+    response = _groq_client.chat.completions.create(
+        model=_GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=3000,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def extract_wasde_data(wasde_text: str) -> dict | None:
-    """
-    Sends WASDE text to Groq LLM and returns parsed JSON dict.
-    """
+    """Sends WASDE text to the configured LLM and returns parsed JSON dict."""
     truncated = wasde_text[:50000]
     prompt = EXTRACTION_PROMPT.format(text=truncated)
 
     for attempt in range(3):
         try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=3000,
-            )
-            raw = response.choices[0].message.content.strip()
+            raw = _call_llm(prompt)
             raw = _clean_json(raw)
 
             data = json.loads(raw)
