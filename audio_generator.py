@@ -32,24 +32,13 @@ def text_to_speech(text: str, output_path: str) -> bool:
         # Truncate text to avoid rate limits (~4000 chars is safe)
         tts_text = text[:4000]
 
-        try:
-            response = client.audio.speech.create(
-                model=TTS_MODEL,
-                voice=TTS_VOICE,
-                input=tts_text,
-                response_format="wav",
-            )
-            audio_bytes = response.read()
-        except Exception as tts_err:
-            # Fallback: try orpheus model
-            logger.warning(f"Primary TTS model failed ({tts_err}), trying Orpheus...")
-            response = client.audio.speech.create(
-                model="canopylabs/orpheus-v1-english",
-                voice="tara",
-                input=tts_text,
-                response_format="wav",
-            )
-            audio_bytes = response.read()
+        response = client.audio.speech.create(
+            model=TTS_MODEL,
+            voice=TTS_VOICE,
+            input=tts_text,
+            response_format="wav",
+        )
+        audio_bytes = response.read()
 
         # Save WAV temporarily
         with open(wav_path, "wb") as f:
@@ -79,7 +68,7 @@ def text_to_speech(text: str, output_path: str) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"TTS generation failed: {e}", exc_info=True)
+        logger.error(f"TTS generation failed: {e}")
         return False
 
 
