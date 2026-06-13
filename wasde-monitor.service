@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/home/wasde-monitor
-ExecStart=/home/wasde-monitor/scheduler.py
+ExecStart=/home/wasde-monitor/venv/bin/python /home/wasde-monitor/scheduler.py
+
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal
