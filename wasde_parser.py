@@ -202,6 +202,89 @@ def _find_matrices(section_elem: ET.Element) -> tuple[ET.Element | None, ET.Elem
     return proj, last_est
 
 
+# ── All-matrix finder (for multi-year image data) ────────────────────────────
+
+def _find_all_matrices_in_section(section_elem: ET.Element) -> list[tuple[str, str, ET.Element]]:
+    """
+    Returns [(crop_year_label, data_suffix, matrix_elem)] for every matrix in
+    the section, in document order.  data_suffix is the N in regionN /
+    attributeN / cell_valueN — detected from which region_headerN is non-empty.
+    Covers matrix1..matrix5 (+ any other 'matrixN' tags).
+    """
+    result: list = []
+    seen: set = set()
+    for child in section_elem.iter():
+        if not child.tag.startswith("matrix"):
+            continue
+        eid = id(child)
+        if eid in seen:
+            continue
+        seen.add(eid)
+        for sfx in ("1", "2", "3", "4", "5", "6"):
+            hdr = child.get(f"region_header{sfx}", "").strip()
+            if hdr and "/" in hdr:
+                result.append((hdr, sfx, child))
+                break
+    return result
+
+
+# ── Annual-matrix parser (historical years, no month groups) ──────────────────
+
+def _parse_matrix_annual(matrix_elem: ET.Element) -> dict:
+    """
+    Parse an annual (non-monthly) matrix.  Used for:
+      - matrix1/matrix2 in base sections (sr18/sr22 corn/wheat history)
+      - matrix4/matrix5 in sr28 (soybean history)
+
+    These have no m1_month_group elements — each region has one value per
+    attribute directly.  Returns { norm_region: { norm_attr: float } }.
+
+    Strategy: linear scan — when we see an element with regionN, we enter that
+    region; when we see attributeN, we note the attribute; when we see a Cell
+    with cell_valueN, we record the value.
+    """
+    data_sfx: str | None = None
+    for sfx in ("1", "2", "3", "4", "5", "6"):
+        if matrix_elem.get(f"region_header{sfx}", ""):
+            data_sfx = sfx
+            break
+    if not data_sfx:
+        return {}
+
+    result: dict = {}
+    current_region: str | None = None
+    current_attr:   str | None = None
+
+    for el in matrix_elem.iter():
+        # Region element?
+        region_raw = el.get(f"region{data_sfx}", "")
+        if region_raw:
+            current_region = _norm_region(region_raw)
+            current_attr   = None
+            if current_region and current_region not in result:
+                result[current_region] = {}
+            continue
+
+        # Attribute element?
+        attr_raw = el.get(f"attribute{data_sfx}", "")
+        if attr_raw:
+            attr = _norm_attr(attr_raw)
+            current_attr = next(
+                (t for t in _TARGET_ATTRIBUTES if attr == t or attr.startswith(t + " ")),
+                None,
+            )
+            continue
+
+        # Cell element?
+        if el.tag == "Cell" and current_region and current_attr:
+            val = _parse_float(el.get(f"cell_value{data_sfx}"))
+            if val is not None and current_attr not in result.get(current_region, {}):
+                result[current_region][current_attr] = val
+            current_attr = None   # each attribute group has exactly one cell
+
+    return result
+
+
 # ── Month ordering ────────────────────────────────────────────────────────────
 
 def _sort_months(month_keys) -> list[str]:
@@ -361,6 +444,126 @@ def parse_wasde_xml(xml_bytes: bytes, report_year: int, report_month: int) -> di
         f"Parsed: {report_month_en} | crop_year={crop_year} | "
         f"months={prior_month_name}→{current_month_name} | may_report={is_may_report}"
     )
+    return result
+
+
+def parse_wasde_xml_multi_year(xml_bytes: bytes, report_year: int, report_month: int) -> dict | None:
+    """
+    Parse WASDE XML for image generation.
+    Returns 4-column data (2024/25 · 2025/26 Est. · 2026/27 May · 2026/27 Jun).
+
+    Result shape:
+    {
+        "col_labels": ["2024/25", "2025/26\\nEst.", "2026/27\\n(Mai)", "2026/27\\n(Jun)"],
+        "report_month_pt": "Junho 2026",
+        "soybeans": {
+            "World":         { "Production": [427.93, 429.20, 441.54, 441.34],
+                               "Ending Stocks": [...] },
+            "United States": { ... },
+            "Brazil":        { ... },
+            "Argentina":     { ... },
+        },
+        "corn":  { same },
+        "wheat": { same },
+    }
+    """
+    try:
+        if xml_bytes.startswith(b'\xef\xbb\xbf'):
+            xml_bytes = xml_bytes[3:]
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError as e:
+        logger.error(f"XML parse error: {e}")
+        return None
+
+    cur_m  = list(_MONTH_ORDER.keys())[report_month - 1]          # "Jun"
+    prev_m = list(_MONTH_ORDER.keys())[(report_month - 2) % 12]   # "May"
+
+    # (base_section, cont_section) — same for soybeans since sr28 has everything
+    _SECTION_MAP = {
+        "soybeans": ("sr28", "sr28"),
+        "corn":     ("sr22", "sr23"),
+        "wheat":    ("sr18", "sr19"),
+    }
+
+    _PROD_REGIONS = ["World", "United States", "Brazil", "Argentina"]
+    _IMAGE_ATTRS  = ["Production", "Ending Stocks"]
+
+    def _year_sort(label: str) -> int:
+        m = re.search(r'(\d{4})', label)
+        return int(m.group(1)) if m else 0
+
+    result: dict = {}
+    hist_labels: list[str] = []
+    proj_year:   str | None = None
+
+    for commodity, (base_id, cont_id) in _SECTION_MAP.items():
+        matrices: list = []
+        seen_mx: set = set()
+
+        for sec_id in dict.fromkeys([base_id, cont_id]):   # preserves order, deduplicates
+            rpt = root.find(f"{sec_id}/Report")
+            if rpt is None:
+                continue
+            for hdr, sfx, mx in _find_all_matrices_in_section(rpt):
+                mid = id(mx)
+                if mid not in seen_mx:
+                    seen_mx.add(mid)
+                    matrices.append((hdr, sfx, mx))
+
+        hist = sorted(
+            [(h, s, m) for h, s, m in matrices if "Proj." not in h],
+            key=lambda x: _year_sort(x[0]),
+        )
+        proj = [(h, s, m) for h, s, m in matrices if "Proj." in h]
+
+        # Two most recent historical years
+        hist2 = hist[-2:]
+
+        # Build global column labels once (all commodities share the same crop years)
+        if not hist_labels:
+            for h, _, _ in hist2:
+                hist_labels.append(re.sub(r'\s+(Est\.)', r'\n\1', h).strip())
+
+        if not proj_year and proj:
+            proj_year = re.sub(r'\s+Proj\..*', '', proj[0][0]).strip()
+
+        # Parse annual historical matrices
+        parsed_hist = [(h, _parse_matrix_annual(mx)) for h, _, mx in hist2]
+
+        # Parse projected matrix (monthly) using the existing monthly parser
+        proj_may: dict = {}
+        proj_cur: dict = {}
+        if proj:
+            all_proj = _parse_matrix(proj[0][2])
+            for region, months in all_proj.items():
+                proj_may[region] = months.get(prev_m, {})
+                proj_cur[region] = months.get(cur_m,  {})
+
+        # Assemble 4-column data
+        comm_result: dict = {}
+        for region in _PROD_REGIONS:
+            reg_result: dict = {}
+            for attr in _IMAGE_ATTRS:
+                vals = [h_data.get(region, {}).get(attr) for _, h_data in parsed_hist]
+                vals.append(proj_may.get(region, {}).get(attr))
+                vals.append(proj_cur.get(region, {}).get(attr))
+                if any(v is not None for v in vals):
+                    reg_result[attr] = vals
+            if reg_result:
+                comm_result[region] = reg_result
+
+        result[commodity] = comm_result
+
+    col_labels = hist_labels[:]
+    if proj_year:
+        col_labels.append(f"{proj_year}\n({prev_m})")
+        col_labels.append(f"{proj_year}\n({cur_m})")
+
+    result["col_labels"]       = col_labels
+    result["report_month_pt"]  = f"{_MONTH_PT[report_month]} {report_year}"
+    result["report_year"]      = report_year
+    result["report_month"]     = report_month
+
     return result
 
 

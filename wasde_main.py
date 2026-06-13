@@ -12,10 +12,11 @@ import sys
 from datetime import datetime, timezone
 
 from wasde_fetcher     import fetch_wasde_xml
-from wasde_parser      import parse_wasde_xml
+from wasde_parser      import parse_wasde_xml, parse_wasde_xml_multi_year
 from market_data       import get_grain_prices
 from message_formatter import build_telegram_message
-from telegram_sender   import send_message
+from image_generator   import generate_wasde_image
+from telegram_sender   import send_message, send_photo_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,18 @@ def run_wasde_pipeline(year: int, month: int) -> bool:
     logger.info("Step 4: Sending Telegram message...")
     text_msg = build_telegram_message(data, market_prices)
     send_message(text_msg)
+
+    # 5. Generate and send image
+    logger.info("Step 5: Generating image...")
+    multi_year = parse_wasde_xml_multi_year(xml_bytes, year, month)
+    if multi_year:
+        img_bytes = generate_wasde_image(multi_year)
+        if img_bytes:
+            send_photo_bytes(img_bytes)
+        else:
+            logger.warning("Image generation returned None")
+    else:
+        logger.warning("Multi-year parse returned None — skipping image")
 
     logger.info("=== Pipeline complete ===")
     return True

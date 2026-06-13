@@ -31,6 +31,25 @@ def send_message(text: str, parse_mode: str = "Markdown") -> bool:
         return False
 
 
+def send_photo_bytes(image_bytes: bytes, caption: str = "", filename: str = "wasde.png") -> bool:
+    """Sends an in-memory image (bytes) directly to Telegram."""
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/sendPhoto",
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+            files={"photo": (filename, image_bytes, "image/png")},
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            logger.info("Photo (bytes) sent.")
+            return True
+        logger.error(f"sendPhoto failed: {resp.status_code} {resp.text}")
+        return False
+    except Exception as e:
+        logger.error(f"sendPhoto exception: {e}")
+        return False
+
+
 def send_photo(image_path: str, caption: str = "") -> bool:
     """Sends an image file."""
     try:
