@@ -41,18 +41,18 @@ _ACCENTS = {
 }
 
 # ── Layout ────────────────────────────────────────────────────────────────────
-_W        = 900
-_PAD_X    = 30
-_TABLE_W  = _W - 2 * _PAD_X    # 840
-_COL0_W   = 120                 # row-label column
-_DELTA_W  = 100                 # Δ column
-_DATA_W   = (_TABLE_W - _COL0_W - _DELTA_W) // 4  # 155 per data column
-_ROW_H    = 32
-_HDR_H    = 54                  # table column-header row (two lines)
-_TABLE_GAP  = 14
-_SECTION_H  = 58                # section title height (prominent)
-_TITLE_H    = 70
-_FOOTER_H   = 40
+_W        = 1080
+_PAD_X    = 36
+_TABLE_W  = _W - 2 * _PAD_X    # 1008
+_COL0_W   = 148                 # row-label column
+_DELTA_W  = 122                 # Δ column
+_DATA_W   = (_TABLE_W - _COL0_W - _DELTA_W) // 4  # 184 per data column
+_ROW_H    = 42
+_HDR_H    = 66                  # table column-header row (two lines)
+_TABLE_GAP  = 16
+_SECTION_H  = 68                # section title height (prominent)
+_TITLE_H    = 82
+_FOOTER_H   = 50
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
 _FONT_CACHE: dict = {}
@@ -256,11 +256,11 @@ def generate_wasde_image(multi_year_data: dict) -> bytes | None:
 
 
 def _generate(data: dict) -> bytes:
-    f_title = _font(20, bold=True)
-    f_sec   = _font(16, bold=True)   # larger for section titles
-    f_tbl   = _font(13, bold=True)
-    f_hdr   = _font(11)
-    f_data  = _font(12)
+    f_title = _font(26, bold=True)
+    f_sec   = _font(20, bold=True)
+    f_tbl   = _font(17, bold=True)
+    f_hdr   = _font(14)
+    f_data  = _font(15)
 
     col_labels = _col_display(data.get("col_labels", ["", "", "", ""]))
 
