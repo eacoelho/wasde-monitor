@@ -1,6 +1,7 @@
 """
 image_generator.py
 Generates a dark-themed PNG image with WASDE multi-year supply/demand tables.
+5 columns: 2024/25 | 2025/26 Est. | 2026/27 (Mai) | 2026/27 (Jun) | Δ (Jun-Mai)
 """
 
 import os
@@ -19,36 +20,41 @@ except ImportError:
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-_BG       = (13,  17,  23)      # #0D1117  near-black background
-_SURFACE  = (22,  27,  34)      # #161B22  card surface
-_SURFACE2 = (28,  35,  44)      # table header row
-_BORDER   = (48,  54,  61)      # #30363D  subtle grid lines
-_TEXT     = (230, 237, 243)     # #E6EDF3  primary text
-_TEXT_DIM = (139, 148, 158)     # #8B949E  secondary text
+_BG        = (13,  17,  23)     # near-black background
+_SURFACE   = (22,  27,  34)     # card surface
+_SURFACE2  = (28,  35,  44)     # table header row
+_SURFACE3  = (18,  26,  40)     # section header (blue-tinted dark)
+_BORDER    = (48,  54,  61)     # subtle grid lines
+_TEXT      = (230, 237, 243)    # primary text
+_TEXT_DIM  = (139, 148, 158)    # dimmed text (col headers, footer)
+_DELTA_POS = (63,  185, 80)     # positive delta  (green)
+_DELTA_NEG = (248, 81,  73)     # negative delta  (red)
+_DELTA_ZRO = (100, 110, 120)    # zero delta      (muted)
+_SECTION_ACCENT = (88, 166, 255)  # section title accent bar
 
-# Accent colors per commodity and region
 _ACCENTS = {
-    "soybeans": (63,  185, 80),   # green
-    "corn":     (227, 179, 65),   # gold
-    "wheat":    (240, 136, 62),   # orange
-    "World":         (88,  166, 255),  # blue
-    "United States": (121, 192, 255),  # light blue
+    "soybeans":      (63,  185, 80),
+    "corn":          (227, 179, 65),
+    "wheat":         (240, 136, 62),
+    "World":         (88,  166, 255),
+    "United States": (121, 192, 255),
 }
 
-# ── Layout constants ──────────────────────────────────────────────────────────
-_W          = 900    # total image width
-_PAD_X      = 30    # horizontal outer padding
-_TABLE_W    = _W - 2 * _PAD_X   # 840
-_COL0_W     = 130   # label column width
-_DATA_W     = (_TABLE_W - _COL0_W) // 4  # 177 px per data column
-_ROW_H      = 32    # data row height
-_HDR_H      = 52    # column-header row height (fits two lines)
-_TABLE_GAP  = 14    # vertical gap between consecutive tables
-_SECTION_H  = 46    # section title strip height
-_TITLE_H    = 68    # main title height
-_FOOTER_H   = 38
+# ── Layout ────────────────────────────────────────────────────────────────────
+_W        = 900
+_PAD_X    = 30
+_TABLE_W  = _W - 2 * _PAD_X    # 840
+_COL0_W   = 120                 # row-label column
+_DELTA_W  = 100                 # Δ column
+_DATA_W   = (_TABLE_W - _COL0_W - _DELTA_W) // 4  # 155 per data column
+_ROW_H    = 32
+_HDR_H    = 54                  # table column-header row (two lines)
+_TABLE_GAP  = 14
+_SECTION_H  = 58                # section title height (prominent)
+_TITLE_H    = 70
+_FOOTER_H   = 40
 
-# ── Font helpers ──────────────────────────────────────────────────────────────
+# ── Fonts ─────────────────────────────────────────────────────────────────────
 _FONT_CACHE: dict = {}
 
 def _font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont":
@@ -58,16 +64,16 @@ def _font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont":
 
     if sys.platform == "win32":
         candidates = (
-            ["C:/Windows/Fonts/seguisb.ttf",
-             "C:/Windows/Fonts/segoeuib.ttf"] if bold else
-            ["C:/Windows/Fonts/segoeui.ttf",
-             "C:/Windows/Fonts/calibri.ttf"]
+            ["C:/Windows/Fonts/seguisb.ttf", "C:/Windows/Fonts/segoeuib.ttf"]
+            if bold else
+            ["C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/calibri.ttf"]
         )
     else:
         candidates = (
             ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
              "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"] if bold else
+             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"]
+            if bold else
             ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
              "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
              "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"]
@@ -81,7 +87,6 @@ def _font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont":
                 break
             except Exception:
                 continue
-
     if font is None:
         try:
             font = ImageFont.load_default(size=size)
@@ -92,7 +97,7 @@ def _font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont":
     return font
 
 
-# ── Drawing helpers ───────────────────────────────────────────────────────────
+# ── Text helpers ──────────────────────────────────────────────────────────────
 
 def _text_w(text: str, fnt) -> int:
     try:
@@ -102,156 +107,147 @@ def _text_w(text: str, fnt) -> int:
         return bb[2] - bb[0]
 
 
-def _draw_text_center(draw: "ImageDraw.ImageDraw", x: int, y: int, w: int, h: int,
-                      text: str, fnt, color: tuple, multiline: bool = False):
-    """Draw text centered in a bounding box (x, y, x+w, y+h)."""
+def _font_height(fnt) -> int:
+    try:
+        bb = fnt.getbbox("Ag")
+        return bb[3] - bb[1] + 3
+    except Exception:
+        return 15
+
+
+def _draw_center(draw, x, y, w, h, text, fnt, color, multiline=False):
     if multiline and "\n" in text:
         lines = text.split("\n")
-        line_h = _font_height(fnt)
-        total_h = line_h * len(lines)
-        ty = y + (h - total_h) // 2
+        lh = _font_height(fnt)
+        total = lh * len(lines)
+        ty = y + (h - total) // 2
         for line in lines:
             tw = _text_w(line, fnt)
-            tx = x + (w - tw) // 2
-            draw.text((tx, ty), line, font=fnt, fill=color)
-            ty += line_h
+            draw.text((x + (w - tw) // 2, ty), line, font=fnt, fill=color)
+            ty += lh
     else:
         tw = _text_w(text, fnt)
         bb = fnt.getbbox(text)
         th = bb[3] - bb[1]
-        tx = x + (w - tw) // 2
-        ty = y + (h - th) // 2
-        draw.text((tx, ty), text, font=fnt, fill=color)
+        draw.text((x + (w - tw) // 2, y + (h - th) // 2), text, font=fnt, fill=color)
 
 
-def _font_height(fnt) -> int:
-    try:
-        bb = fnt.getbbox("Ag")
-        return bb[3] - bb[1] + 2
-    except Exception:
-        return 14
-
-
-def _draw_text_right(draw, x: int, y: int, w: int, h: int, text: str, fnt, color: tuple):
-    """Draw text right-aligned within the bounding box."""
+def _draw_right(draw, x, y, w, h, text, fnt, color):
     tw = _text_w(text, fnt)
     bb = fnt.getbbox(text)
     th = bb[3] - bb[1]
-    tx = x + w - tw - 8
-    ty = y + (h - th) // 2
-    draw.text((tx, ty), text, font=fnt, fill=color)
+    draw.text((x + w - tw - 6, y + (h - th) // 2), text, font=fnt, fill=color)
 
 
-def _draw_text_left(draw, x: int, y: int, w: int, h: int, text: str, fnt, color: tuple):
-    """Draw text left-aligned with small left padding."""
+def _draw_left(draw, x, y, w, h, text, fnt, color, pad=8):
     bb = fnt.getbbox(text)
     th = bb[3] - bb[1]
-    tx = x + 8
-    ty = y + (h - th) // 2
-    draw.text((tx, ty), text, font=fnt, fill=color)
+    draw.text((x + pad, y + (h - th) // 2), text, font=fnt, fill=color)
 
 
-def _fmt(value: float | None) -> str:
-    """pt-BR number format: 1300.38 → '1.300,38'; None → '—'"""
-    if value is None:
+# ── Formatting ────────────────────────────────────────────────────────────────
+
+def _fmt(v: float | None) -> str:
+    if v is None:
         return "—"
-    s = f"{value:,.2f}"
+    s = f"{v:,.2f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-# ── Table drawing ─────────────────────────────────────────────────────────────
+def _fmt_delta(v3: float | None, v4: float | None) -> tuple[str, tuple]:
+    """Returns (formatted string, color) for delta = v4 - v3."""
+    if v3 is None or v4 is None:
+        return "—", _DELTA_ZRO
+    d = round(v4 - v3, 2)
+    if d > 0:
+        s = f"+{d:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return s, _DELTA_POS
+    elif d < 0:
+        s = f"{d:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return s, _DELTA_NEG
+    return "0,00", _DELTA_ZRO
 
-def _draw_table(
-    draw: "ImageDraw.ImageDraw",
-    x: int, y: int,
-    title: str,
-    title_color: tuple,
-    col_headers: list[str],
-    rows: list[tuple[str, list[float | None]]],
-    fnt_title,
-    fnt_hdr,
-    fnt_data,
-) -> int:
-    """
-    Draw a single table.  Returns the y coordinate after the table.
-
-    col_headers: list of 4 strings (may contain \\n for two-line headers)
-    rows: [(row_label, [val0, val1, val2, val3]), ...]
-    """
-    table_w = _TABLE_W
-    col_x   = [x + _COL0_W + i * _DATA_W for i in range(4)]
-
-    # ── Title row (colored band) ──────────────────────────────────────────────
-    draw.rectangle([x, y, x + table_w, y + _HDR_H], fill=_SURFACE2)
-    # left accent stripe
-    draw.rectangle([x, y, x + 4, y + _HDR_H], fill=title_color)
-    # title text (left-aligned in label col)
-    _draw_text_left(draw, x + 4, y, _COL0_W, _HDR_H, title, fnt_title, title_color)
-    # column header labels (centered, potentially two lines)
-    for i, hdr in enumerate(col_headers):
-        cx = col_x[i]
-        _draw_text_center(draw, cx, y, _DATA_W, _HDR_H, hdr, fnt_hdr, _TEXT_DIM, multiline=True)
-    y += _HDR_H
-
-    # ── Data rows ─────────────────────────────────────────────────────────────
-    for ri, (label, vals) in enumerate(rows):
-        row_bg = _SURFACE if ri % 2 == 0 else _BG
-        draw.rectangle([x, y, x + table_w, y + _ROW_H], fill=row_bg)
-        # left separator line
-        draw.line([(x, y), (x + table_w, y)], fill=_BORDER, width=1)
-        # row label
-        _draw_text_left(draw, x, y, _COL0_W, _ROW_H, label, fnt_data, _TEXT)
-        # data values
-        for i, val in enumerate(vals):
-            cx = col_x[i]
-            text_color = _TEXT if val is not None else _TEXT_DIM
-            _draw_text_right(draw, cx, y, _DATA_W, _ROW_H, _fmt(val), fnt_data, text_color)
-        y += _ROW_H
-
-    # bottom border
-    draw.line([(x, y), (x + table_w, y)], fill=_BORDER, width=1)
-    return y
-
-
-# ── Section title strip ───────────────────────────────────────────────────────
-
-def _draw_section_title(draw, x: int, y: int, text: str, fnt) -> int:
-    draw.rectangle([x, y, x + _TABLE_W, y + _SECTION_H], fill=_SURFACE)
-    _draw_text_left(draw, x, y, _TABLE_W, _SECTION_H, text, fnt, _TEXT)
-    return y + _SECTION_H
-
-
-# ── Column-label helpers ──────────────────────────────────────────────────────
 
 def _col_display(col_labels: list[str]) -> list[str]:
-    """
-    Convert raw col_labels (e.g. ['2024/25', '2025/26\\nEst.', '2026/27\\n(May)', '2026/27\\n(Jun)'])
-    to display labels with translated month abbreviation for the last two columns.
-    """
-    _MONTH_PT_ABB = {
-        "Jan":"Jan", "Feb":"Fev", "Mar":"Mar", "Apr":"Abr", "May":"Mai",
-        "Jun":"Jun", "Jul":"Jul", "Aug":"Ago", "Sep":"Set", "Oct":"Out",
-        "Nov":"Nov", "Dec":"Dez",
-    }
+    _PT = {"Jan":"Jan","Feb":"Fev","Mar":"Mar","Apr":"Abr","May":"Mai",
+           "Jun":"Jun","Jul":"Jul","Aug":"Ago","Sep":"Set","Oct":"Out",
+           "Nov":"Nov","Dec":"Dez"}
     out = []
     for lbl in col_labels:
-        for en, pt in _MONTH_PT_ABB.items():
+        for en, pt in _PT.items():
             lbl = lbl.replace(f"({en})", f"({pt})")
         out.append(lbl)
     return out
 
 
+# ── Table drawing ─────────────────────────────────────────────────────────────
+
+def _draw_table(draw, x, y, title, title_color, col_headers, rows, f_tbl, f_hdr, f_data):
+    """
+    Draw one 5-column table (4 data cols + Δ col).
+    col_headers: list of 4 strings for the data columns.
+    rows: [(label, [v0,v1,v2,v3]), ...] — delta computed from v3-v2.
+    Returns y after the table.
+    """
+    tw   = _TABLE_W
+    dx   = x + _COL0_W                          # first data column x
+    col_x = [dx + i * _DATA_W for i in range(4)]
+    delta_x = dx + 4 * _DATA_W                  # delta column x
+
+    # ── Header row ────────────────────────────────────────────────────────────
+    draw.rectangle([x, y, x + tw, y + _HDR_H], fill=_SURFACE2)
+    draw.rectangle([x, y, x + 4, y + _HDR_H], fill=title_color)
+    _draw_left(draw, x + 4, y, _COL0_W, _HDR_H, title, f_tbl, title_color)
+
+    for i, hdr in enumerate(col_headers):
+        _draw_center(draw, col_x[i], y, _DATA_W, _HDR_H, hdr, f_hdr, _TEXT_DIM, multiline=True)
+
+    # Delta column header
+    _draw_center(draw, delta_x, y, _DELTA_W, _HDR_H, "Δ\n(Jun-Mai)", f_hdr, _TEXT_DIM, multiline=True)
+
+    y += _HDR_H
+
+    # ── Data rows ─────────────────────────────────────────────────────────────
+    for ri, (label, vals) in enumerate(rows):
+        bg = _SURFACE if ri % 2 == 0 else _BG
+        draw.rectangle([x, y, x + tw, y + _ROW_H], fill=bg)
+        draw.line([(x, y), (x + tw, y)], fill=_BORDER, width=1)
+
+        _draw_left(draw, x, y, _COL0_W, _ROW_H, label, f_data, _TEXT)
+
+        for i, v in enumerate(vals):
+            c = _TEXT if v is not None else _TEXT_DIM
+            _draw_right(draw, col_x[i], y, _DATA_W, _ROW_H, _fmt(v), f_data, c)
+
+        d_str, d_color = _fmt_delta(vals[2], vals[3])
+        _draw_right(draw, delta_x, y, _DELTA_W, _ROW_H, d_str, f_data, d_color)
+
+        y += _ROW_H
+
+    draw.line([(x, y), (x + tw, y)], fill=_BORDER, width=1)
+    return y
+
+
+# ── Section title ─────────────────────────────────────────────────────────────
+
+def _draw_section_title(draw, x, y, text, f_sec) -> int:
+    """Draw a prominent section header strip."""
+    draw.rectangle([x, y, x + _TABLE_W, y + _SECTION_H], fill=_SURFACE3)
+    # thick left accent bar
+    draw.rectangle([x, y, x + 6, y + _SECTION_H], fill=_SECTION_ACCENT)
+    # bottom separator line
+    draw.line([(x, y + _SECTION_H - 1), (x + _TABLE_W, y + _SECTION_H - 1)],
+              fill=_SECTION_ACCENT, width=1)
+    _draw_left(draw, x + 6, y, _TABLE_W - 6, _SECTION_H, text, f_sec, _TEXT, pad=12)
+    return y + _SECTION_H
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def generate_wasde_image(multi_year_data: dict) -> bytes | None:
-    """
-    Build the WASDE image from multi-year parsed data.
-    Returns PNG bytes or None on error.
-    """
     if not _PIL_OK:
         logger.error("Pillow not available; cannot generate image")
         return None
-
     try:
         return _generate(multi_year_data)
     except Exception as e:
@@ -260,51 +256,42 @@ def generate_wasde_image(multi_year_data: dict) -> bytes | None:
 
 
 def _generate(data: dict) -> bytes:
-    # ── Fonts ─────────────────────────────────────────────────────────────────
-    f_title  = _font(20, bold=True)
-    f_sec    = _font(14, bold=True)
-    f_tbl    = _font(13, bold=True)
-    f_hdr    = _font(11)
-    f_data   = _font(12)
+    f_title = _font(20, bold=True)
+    f_sec   = _font(16, bold=True)   # larger for section titles
+    f_tbl   = _font(13, bold=True)
+    f_hdr   = _font(11)
+    f_data  = _font(12)
 
-    col_labels = _col_display(data.get("col_labels", ["","","",""]))
+    col_labels = _col_display(data.get("col_labels", ["", "", "", ""]))
 
-    # ── Commodity configs ──────────────────────────────────────────────────────
     PROD_LAYOUT = [
         ("soybeans", "Soja",  ["EUA","Brasil","Argentina","Mundo"],
-         ["United States","Brazil","Argentina","World"]),
+                              ["United States","Brazil","Argentina","World"]),
         ("corn",     "Milho", ["EUA","Brasil","Argentina","Mundo"],
-         ["United States","Brazil","Argentina","World"]),
+                              ["United States","Brazil","Argentina","World"]),
         ("wheat",    "Trigo", ["EUA","Brasil","Argentina","Mundo"],
-         ["United States","Brazil","Argentina","World"]),
+                              ["United States","Brazil","Argentina","World"]),
     ]
     STOCK_LAYOUT = [
-        ("World",         "Mundo",
-         [("soybeans","Soja"),("corn","Milho"),("wheat","Trigo")]),
-        ("United States", "EUA",
-         [("soybeans","Soja"),("corn","Milho"),("wheat","Trigo")]),
+        ("World",         "Mundo", [("soybeans","Soja"),("corn","Milho"),("wheat","Trigo")]),
+        ("United States", "EUA",   [("soybeans","Soja"),("corn","Milho"),("wheat","Trigo")]),
     ]
 
-    # ── Compute required height ────────────────────────────────────────────────
-    prod_rows_per = 4
-    stock_rows_per = 3
+    PROD_ROWS  = 4
+    STOCK_ROWS = 3
 
     h = (
-        30                                                          # top pad
-        + _TITLE_H                                                  # main title
-        + 12                                                        # gap
-        + _SECTION_H                                                # section 1 title
-        + 8                                                         # gap
-        + len(PROD_LAYOUT) * (_HDR_H + prod_rows_per * _ROW_H + 1)  # tables
-        + (len(PROD_LAYOUT) - 1) * _TABLE_GAP                      # inter-table gaps
-        + 20                                                        # section gap
-        + _SECTION_H                                                # section 2 title
-        + 8
-        + len(STOCK_LAYOUT) * (_HDR_H + stock_rows_per * _ROW_H + 1)
+        30
+        + _TITLE_H + 14
+        + _SECTION_H + 10
+        + len(PROD_LAYOUT) * (_HDR_H + PROD_ROWS * _ROW_H + 1)
+        + (len(PROD_LAYOUT) - 1) * _TABLE_GAP
+        + 22
+        + _SECTION_H + 10
+        + len(STOCK_LAYOUT) * (_HDR_H + STOCK_ROWS * _ROW_H + 1)
         + (len(STOCK_LAYOUT) - 1) * _TABLE_GAP
-        + 20
-        + _FOOTER_H
-        + 20                                                        # bottom pad
+        + 22
+        + _FOOTER_H + 20
     )
 
     img  = Image.new("RGB", (_W, h), color=_BG)
@@ -315,52 +302,44 @@ def _generate(data: dict) -> bytes:
 
     # ── Main title ─────────────────────────────────────────────────────────────
     month_pt = data.get("report_month_pt", "WASDE")
-    title    = f"WASDE  -  {month_pt}"
     draw.rectangle([x, y, x + _TABLE_W, y + _TITLE_H], fill=_SURFACE2)
     draw.rectangle([x, y, x + 5, y + _TITLE_H], fill=_ACCENTS["soybeans"])
-    _draw_text_center(draw, x, y, _TABLE_W, _TITLE_H, title, f_title, _TEXT)
-    y += _TITLE_H + 12
+    _draw_center(draw, x, y, _TABLE_W, _TITLE_H, f"WASDE  -  {month_pt}", f_title, _TEXT)
+    y += _TITLE_H + 14
 
-    # ── Section 1: Production ──────────────────────────────────────────────────
+    # ── Section 1: Produção ────────────────────────────────────────────────────
     y = _draw_section_title(draw, x, y, "  Produção  (milhões de t)", f_sec)
-    y += 8
+    y += 10
 
     for comm_key, comm_label, pt_regions, xml_regions in PROD_LAYOUT:
-        accent = _ACCENTS.get(comm_key, _TEXT)
+        accent    = _ACCENTS.get(comm_key, _TEXT)
         comm_data = data.get(comm_key, {})
-
-        rows = []
-        for pt_r, xml_r in zip(pt_regions, xml_regions):
-            vals = [comm_data.get(xml_r, {}).get("Production", [None]*4)[i] for i in range(4)]
-            rows.append((pt_r, vals))
-
-        y = _draw_table(draw, x, y, comm_label, accent, col_labels, rows,
-                        f_tbl, f_hdr, f_data)
+        rows = [
+            (pt_r, [comm_data.get(xml_r, {}).get("Production", [None]*4)[i] for i in range(4)])
+            for pt_r, xml_r in zip(pt_regions, xml_regions)
+        ]
+        y = _draw_table(draw, x, y, comm_label, accent, col_labels, rows, f_tbl, f_hdr, f_data)
         y += _TABLE_GAP
 
-    # ── Section 2: Ending Stocks ───────────────────────────────────────────────
-    y += 20 - _TABLE_GAP   # replace last table gap with larger section gap
+    # ── Section 2: Estoques Finais ─────────────────────────────────────────────
+    y += 22 - _TABLE_GAP
     y = _draw_section_title(draw, x, y, "  Estoques Finais  (milhões de t)", f_sec)
-    y += 8
+    y += 10
 
     for xml_region, pt_region, commodities in STOCK_LAYOUT:
         accent = _ACCENTS.get(xml_region, _TEXT)
-
-        rows = []
-        for comm_key, comm_label in commodities:
-            comm_data = data.get(comm_key, {})
-            vals = [comm_data.get(xml_region, {}).get("Ending Stocks", [None]*4)[i] for i in range(4)]
-            rows.append((comm_label, vals))
-
-        y = _draw_table(draw, x, y, pt_region, accent, col_labels, rows,
-                        f_tbl, f_hdr, f_data)
+        rows = [
+            (lbl, [data.get(ck, {}).get(xml_region, {}).get("Ending Stocks", [None]*4)[i]
+                   for i in range(4)])
+            for ck, lbl in commodities
+        ]
+        y = _draw_table(draw, x, y, pt_region, accent, col_labels, rows, f_tbl, f_hdr, f_data)
         y += _TABLE_GAP
 
     # ── Footer ─────────────────────────────────────────────────────────────────
-    y += 20 - _TABLE_GAP
+    y += 22 - _TABLE_GAP
     draw.rectangle([x, y, x + _TABLE_W, y + _FOOTER_H], fill=_SURFACE)
-    _draw_text_center(draw, x, y, _TABLE_W, _FOOTER_H,
-                      "Fonte: USDA / WASDE", f_hdr, _TEXT_DIM)
+    _draw_center(draw, x, y, _TABLE_W, _FOOTER_H, "Fonte: USDA / WASDE", f_hdr, _TEXT_DIM)
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=True)
