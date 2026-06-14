@@ -10,7 +10,7 @@ TELEGRAM_CHAT_ID   = "YOUR_CHAT_ID_HERE"    # e.g. "-1001234567890"
 
 # ── WASDE XML URL Pattern ─────────────────────────────────────────────────────
 # wasde{MM}{YY}v2.xml  e.g. wasde0626v2.xml for June 2026
-WASDE_XML_URL = "https://www.usda.gov/oce/commodity/wasde/wasde{month:02d}{year:02d}v2.xml"
+WASDE_XML_URL = "https://www.usda.gov/oce/commodity/wasde/wasde{month:02d}{year:02d}.xml"
 
 # ── 2026 Release Schedule (ET = UTC-4 in summer, UTC-5 in winter) ─────────────
 # All releases at 12:00 PM ET.
